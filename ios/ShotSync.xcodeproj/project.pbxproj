@@ -1,0 +1,192 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+/* Begin PBXBuildFile section */
+		202600000000000000000001 /* ShotSyncApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202600000000000000000011 /* ShotSyncApp.swift */; };
+		202600000000000000000002 /* Receiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202600000000000000000012 /* Receiver.swift */; };
+		202600000000000000000003 /* PhotoSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202600000000000000000013 /* PhotoSync.swift */; };
+		202600000000000000000004 /* BGRefresh.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202600000000000000000014 /* BGRefresh.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		202600000000000000000011 /* ShotSyncApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShotSyncApp.swift; sourceTree = "<group>"; };
+		202600000000000000000012 /* Receiver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Receiver.swift; sourceTree = "<group>"; };
+		202600000000000000000013 /* PhotoSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoSync.swift; sourceTree = "<group>"; };
+		202600000000000000000014 /* BGRefresh.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BGRefresh.swift; sourceTree = "<group>"; };
+		202600000000000000000015 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		202600000000000000000016 /* ShotSync.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ShotSync.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		202600000000000000000021 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		202600000000000000000031 = {
+			isa = PBXGroup;
+			children = (
+				202600000000000000000032 /* ShotSync */,
+				202600000000000000000033 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		202600000000000000000032 /* ShotSync */ = {
+			isa = PBXGroup;
+			children = (
+				202600000000000000000011 /* ShotSyncApp.swift */,
+				202600000000000000000012 /* Receiver.swift */,
+				202600000000000000000013 /* PhotoSync.swift */,
+				202600000000000000000014 /* BGRefresh.swift */,
+				202600000000000000000015 /* Info.plist */,
+			);
+			path = ShotSync;
+			sourceTree = "<group>";
+		};
+		202600000000000000000033 /* Products */ = {
+			isa = PBXGroup;
+			children = (202600000000000000000016 /* ShotSync.app */);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		202600000000000000000041 /* ShotSync */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 202600000000000000000071 /* Build configuration list for PBXNativeTarget "ShotSync" */;
+			buildPhases = (
+				202600000000000000000051 /* Sources */,
+				202600000000000000000021 /* Frameworks */,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = ShotSync;
+			productName = ShotSync;
+			productReference = 202600000000000000000016 /* ShotSync.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		202600000000000000000042 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 2660;
+				TargetAttributes = { 202600000000000000000041 = { CreatedOnToolsVersion = 26.6; }; };
+			};
+			buildConfigurationList = 202600000000000000000072 /* Build configuration list for PBXProject "ShotSync" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = zh_CN;
+			hasScannedForEncodings = 0;
+			knownRegions = (zh_CN, Base);
+			mainGroup = 202600000000000000000031;
+			productRefGroup = 202600000000000000000033 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (202600000000000000000041 /* ShotSync */);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		202600000000000000000051 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				202600000000000000000001 /* ShotSyncApp.swift in Sources */,
+				202600000000000000000002 /* Receiver.swift in Sources */,
+				202600000000000000000003 /* PhotoSync.swift in Sources */,
+				202600000000000000000004 /* BGRefresh.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		202600000000000000000061 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				"CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]" = ShotSync/Simulator.entitlements;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ShotSync/Info.plist;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = local.shotsync.ios;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		202600000000000000000062 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				"CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]" = ShotSync/Simulator.entitlements;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ShotSync/Info.plist;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = local.shotsync.ios;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		202600000000000000000063 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		202600000000000000000064 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 5.0;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		202600000000000000000071 /* Build configuration list for PBXNativeTarget "ShotSync" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				202600000000000000000061 /* Debug */,
+				202600000000000000000062 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		202600000000000000000072 /* Build configuration list for PBXProject "ShotSync" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				202600000000000000000063 /* Debug */,
+				202600000000000000000064 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 202600000000000000000042 /* Project object */;
+}

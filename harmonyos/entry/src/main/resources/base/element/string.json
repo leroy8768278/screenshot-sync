@@ -1,0 +1,6 @@
+{
+  "string": [
+    { "name": "module_description", "value": "通过局域网同步手机截图到 Mac" },
+    { "name": "gallery_permission_reason", "value": "读取系统截图相册，将截图同步到已配对的 Mac" }
+  ]
+}
