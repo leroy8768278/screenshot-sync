@@ -3,14 +3,17 @@ import { util } from '@kit.ArkTS';
 import { fileIo } from '@kit.CoreFileKit';
 import { isLocalAddress, isPairingCode } from './Protocol';
 
+export const SYNC_SESSION_START: string = 'syncSessionStartedMs';
+
 export class Pairing {
   constructor(
     public host: string,
     public token: string,
-    public sinceMs: number,
+    public sessionStartedMs: number | undefined,
     public installation: string,
     public destination: string,
-    public enabled: boolean
+    public enabled: boolean,
+    public revision: number
   ) {}
 }
 
@@ -24,11 +27,15 @@ export function loadPairing(context: common.Context): Pairing | undefined {
     return undefined;
   }
   const value: Pairing = JSON.parse(fileIo.readTextSync(path)) as Pairing;
+  value.revision = value.revision ?? 0;
   if (typeof value.host !== 'string' || !isLocalAddress(value.host) ||
     typeof value.token !== 'string' || !isPairingCode(value.token) ||
     typeof value.installation !== 'string' || !/^[a-f0-9]{32}$/.test(value.installation) ||
     typeof value.destination !== 'string' || !/^[a-f0-9]{32}$/.test(value.destination) ||
-    !Number.isSafeInteger(value.sinceMs) || value.sinceMs < 0 || typeof value.enabled !== 'boolean') {
+    (value.sessionStartedMs !== undefined &&
+      (!Number.isSafeInteger(value.sessionStartedMs) || value.sessionStartedMs <= 0)) ||
+    typeof value.enabled !== 'boolean' ||
+    !Number.isSafeInteger(value.revision) || value.revision < 0) {
     throw new Error('本机配对设置无法读取');
   }
   return value;
@@ -39,14 +46,26 @@ function randomID(): string {
 }
 
 export function createPairing(
-  host: string, token: string, includeExisting: boolean, previous?: Pairing
+  host: string, token: string, sessionStartedMs: number, previous?: Pairing
 ): Pairing {
   const sameDestination: boolean = previous !== undefined && previous.token === token;
-  return new Pairing(host, token,
-    sameDestination && previous ? previous.sinceMs : includeExisting ? 0 : Date.now(),
+  return new Pairing(host, token, sessionStartedMs,
     previous ? previous.installation : randomID(),
     sameDestination && previous ? previous.destination : randomID(),
-    true);
+    previous?.enabled ?? true, (previous?.revision ?? 0) + 1);
+}
+
+export function withSyncEnabled(pairing: Pairing, enabled: boolean): Pairing {
+  return new Pairing(pairing.host, pairing.token, pairing.sessionStartedMs, pairing.installation, pairing.destination,
+    enabled, pairing.revision + 1);
+}
+
+export function startSyncSession(context: common.Context, startedMs: number): void {
+  const pairing: Pairing | undefined = loadPairing(context);
+  if (pairing) {
+    savePairing(context, new Pairing(pairing.host, pairing.token, startedMs, pairing.installation, pairing.destination,
+      pairing.enabled, pairing.revision + 1));
+  }
 }
 
 export function savePairing(context: common.Context, value: Pairing): void {

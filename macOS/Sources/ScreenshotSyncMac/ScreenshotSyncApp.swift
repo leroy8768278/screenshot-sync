@@ -36,8 +36,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 private struct InboxView: View {
     @ObservedObject var model: ReceiverModel
+    @AppStorage("recentScreenshotSource") private var selectedSource: ScreenshotSource = .iOS
     @State private var showCode = false
     @State private var confirmReset = false
+    @State private var showUnclassified = false
     @State private var copied: String?
     @State private var copyTask: Task<Void, Never>?
 
@@ -168,43 +170,74 @@ private struct InboxView: View {
     }
 
     private var screenshotList: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("最近接收").font(.headline)
-            Group {
-                if model.recent.isEmpty {
-                    VStack(spacing: 9) {
-                        Image(systemName: "photo.on.rectangle")
-                            .font(.system(size: 25))
-                            .accessibilityHidden(true)
-                        Text("还没有收到截图").font(.callout)
-                    }
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    List(model.recent) { screenshot in
-                        HStack(spacing: 10) {
-                            Image(systemName: "photo")
-                                .foregroundStyle(Color.accentColor)
-                                .accessibilityHidden(true)
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(screenshot.url.lastPathComponent).lineLimit(1).truncationMode(.middle)
-                                Text(screenshot.date.formatted(date: .abbreviated, time: .shortened))
-                                    .font(.caption).foregroundStyle(.secondary)
+        let unclassified = model.recent[nil, default: []]
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("最近接收").font(.headline)
+                Spacer()
+                if !unclassified.isEmpty {
+                    Button("查看未归类") { showUnclassified.toggle() }
+                        .popover(isPresented: $showUnclassified, arrowEdge: .bottom) {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("未归类的截图").font(.headline)
+                                screenshotPanel(unclassified, emptyMessage: "没有未归类的截图")
                             }
-                            Spacer()
-                            Text(ByteCountFormatter.string(fromByteCount: screenshot.bytes, countStyle: .file))
-                                .font(.caption).foregroundStyle(.secondary)
-                            Button("打开") { NSWorkspace.shared.open(screenshot.url) }
-                                .buttonStyle(.borderless)
+                            .padding()
+                            .frame(width: 510, height: 315)
                         }
-                        .padding(.vertical, 4)
-                    }
-                    .listStyle(.inset)
                 }
             }
-            .frame(minHeight: 110)
-            .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
+            Picker("截图来源", selection: $selectedSource) {
+                ForEach(ScreenshotSource.allCases, id: \.self) { source in
+                    Text(source.label).tag(source)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: 340)
+
+            screenshotPanel(
+                model.recent[selectedSource, default: []],
+                emptyMessage: "还没有收到来自 \(selectedSource.label) 的截图"
+            )
         }
+    }
+
+    private func screenshotPanel(_ screenshots: [ReceivedScreenshot], emptyMessage: String) -> some View {
+        Group {
+            if screenshots.isEmpty {
+                VStack(spacing: 9) {
+                    Image(systemName: "photo.on.rectangle")
+                        .font(.system(size: 25))
+                        .accessibilityHidden(true)
+                    Text(emptyMessage).font(.callout)
+                }
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(screenshots) { screenshot in
+                    HStack(spacing: 10) {
+                        Image(systemName: "photo")
+                            .foregroundStyle(Color.accentColor)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(screenshot.url.lastPathComponent).lineLimit(1).truncationMode(.middle)
+                            Text(screenshot.date.formatted(date: .abbreviated, time: .shortened))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Text(ByteCountFormatter.string(fromByteCount: screenshot.bytes, countStyle: .file))
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button("打开") { NSWorkspace.shared.open(screenshot.url) }
+                            .buttonStyle(.borderless)
+                    }
+                    .padding(.vertical, 4)
+                }
+                .listStyle(.inset)
+            }
+        }
+        .frame(minHeight: 110)
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private func copyButton(_ value: String) -> some View {

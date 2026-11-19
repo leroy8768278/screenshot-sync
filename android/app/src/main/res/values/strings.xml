@@ -8,10 +8,11 @@
     <string name="code">配对码</string>
     <string name="code_hint">填写 Mac 上显示的 24 位配对码</string>
     <string name="automatic">自动同步新的截图</string>
-    <string name="history">也同步已有截图</string>
     <string name="save">保存设置</string>
     <string name="test">测试连接</string>
     <string name="sync">立即同步</string>
+    <string name="stop_sync">停止同步</string>
+    <string name="resume_sync">继续同步</string>
     <string name="status_title">同步状态</string>
     <string name="permission">允许读取截图</string>
     <string name="permission_full">已允许访问全部照片。只会同步识别为截图的图片。</string>
@@ -19,9 +20,10 @@
     <string name="permission_missing">同步需要照片读取权限。</string>
     <string name="open_settings">系统设置</string>
     <string name="permission_button_partial">更改照片授权</string>
-    <string name="background_hint">在应用内检测新截图，后台同步由 Android 调度，进入省电模式时可能延迟。请在可信任的 Wi-Fi 上使用。</string>
+    <string name="background_hint">只同步此次打开应用后新增的截图。后台同步由 Android 调度，进入省电模式时可能延迟。请在可信任的 Wi-Fi 上使用。</string>
     <string name="status_setup">填写并保存 Mac 地址与配对码后即可同步。</string>
     <string name="status_saved">设置已保存。</string>
+    <string name="status_paused">同步已暂停，点击「继续同步」恢复。</string>
     <string name="status_queued">已安排同步。</string>
     <string name="status_scanning">正在检查截图…</string>
     <string name="status_done">本次已同步 %1$d 张截图。</string>

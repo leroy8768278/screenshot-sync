@@ -44,11 +44,19 @@ private struct SyncHome: View {
                         }
                         .disabled(sync.working)
 
-                        Toggle("自动同步", isOn: Binding(
-                            get: { receiver.automatic },
-                            set: { sync.setAutomatic($0) }
-                        ))
-                        .disabled(sync.working)
+                        if sync.working || receiver.automatic {
+                            Button(role: .destructive) {
+                                sync.setAutomatic(false)
+                            } label: {
+                                Label("停止同步", systemImage: "stop.circle")
+                            }
+                        } else {
+                            Button {
+                                sync.setAutomatic(true)
+                            } label: {
+                                Label("继续同步", systemImage: "play.circle")
+                            }
+                        }
 
                         Button {
                             Task { await sync.scan(manual: true) }
@@ -57,7 +65,9 @@ private struct SyncHome: View {
                         }
                         .disabled(sync.working || !sync.canReadPhotos)
                     } footer: {
-                        Text("打开 App 时自动检查新截图。后台同步由 iOS 安排，时间可能延后。")
+                        Text(receiver.automatic
+                             ? "打开 App 时自动检查新截图。后台同步由 iOS 安排，时间可能延后。"
+                             : "自动同步已暂停。可以立即同步一次，或继续自动同步。")
                     }
 
                     Section {
@@ -131,8 +141,8 @@ private struct SyncHome: View {
     }
 
     private var statusDetail: String {
-        guard let receiver = sync.receiver else { return "通过局域网把 iPhone 截图发送到 Mac。" }
-        return receiver.startDate == nil ? "同步范围包含已有截图" : "同步范围为配对后的截图"
+        guard sync.receiver != nil else { return "通过局域网把 iPhone 截图发送到 Mac。" }
+        return "仅同步本次启动后截取的新截图"
     }
 
     private var lastSentLabel: String {
@@ -162,7 +172,6 @@ private struct ConnectionForm: View {
     @ObservedObject private var sync: PhotoSync
     @State private var address: String
     @State private var code: String
-    @State private var includeHistory: Bool
     @State private var connecting = false
     @State private var errorMessage: String?
 
@@ -170,7 +179,6 @@ private struct ConnectionForm: View {
         self.sync = sync
         _address = State(initialValue: sync.receiver?.displayAddress ?? "")
         _code = State(initialValue: sync.receiver?.code ?? "")
-        _includeHistory = State(initialValue: sync.receiver != nil && sync.receiver?.startDate == nil)
     }
 
     var body: some View {
@@ -189,12 +197,6 @@ private struct ConnectionForm: View {
                         .privacySensitive()
                 } footer: {
                     Text("输入 Mac App 显示的地址和配对码，端口默认为 43871。")
-                }
-
-                Section {
-                    Toggle("同步已有截图", isOn: $includeHistory)
-                } footer: {
-                    Text("关闭时，先前的截图不会加入本次同步范围。")
                 }
 
                 Section {
@@ -239,11 +241,9 @@ private struct ConnectionForm: View {
             let input = address.trimmingCharacters(in: .whitespacesAndNewlines)
             let fields = input.replacingOccurrences(of: "http://", with: "", options: .anchored).components(separatedBy: ":")
             guard fields.count <= 2 else { throw SyncIssue.invalidAddress }
-            let sameReceiver = code.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == sync.receiver?.code
-            let startDate = includeHistory ? nil : (sameReceiver ? sync.receiver?.startDate ?? .now : .now)
             let receiver = try Receiver(
                 address: fields[0], port: fields.count == 2 ? fields[1] : "43871", code: code,
-                startDate: startDate, automatic: sync.receiver?.automatic ?? true
+                automatic: sync.receiver?.automatic ?? true
             )
             try await sync.connect(receiver)
             dismiss()

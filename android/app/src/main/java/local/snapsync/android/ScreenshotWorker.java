@@ -3,6 +3,8 @@ package local.snapsync.android;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.database.Cursor;
+import android.os.CancellationSignal;
+import android.os.OperationCanceledException;
 import android.os.SystemClock;
 
 import androidx.annotation.NonNull;
@@ -17,6 +19,8 @@ import java.util.concurrent.locks.ReentrantLock;
 public final class ScreenshotWorker extends Worker {
     private static final ReentrantLock SYNC_LOCK = new ReentrantLock();
     private static final long MAX_RUN_MILLIS = TimeUnit.MINUTES.toMillis(7);
+    private final CancellationSignal readCancellation = new CancellationSignal();
+    private volatile ReceiverConnection activeReceiver;
 
     public ScreenshotWorker(@NonNull Context context, @NonNull WorkerParameters params) {
         super(context, params);
@@ -28,7 +32,9 @@ public final class ScreenshotWorker extends Worker {
         Context context = getApplicationContext();
         SyncSettings.Pairing pairing = SyncSettings.read(context);
         boolean manual = getInputData().getBoolean(SyncScheduler.MANUAL, false);
-        if (!pairing.isConfigured() || (!manual && !pairing.automatic())
+        // Jobs already scheduled by the previous version have no generation.
+        String generation = getInputData().getString(SyncScheduler.GENERATION);
+        if (!pairing.canSync(manual) || (generation != null && !generation.equals(pairing.generation()))
             || PhotoAccess.current(context) == PhotoAccess.NONE) {
             return Result.success();
         }
@@ -42,6 +48,15 @@ public final class ScreenshotWorker extends Worker {
         }
     }
 
+    @Override
+    public void onStopped() {
+        ReceiverConnection receiver = activeReceiver;
+        if (receiver != null) {
+            receiver.close();
+        }
+        readCancellation.cancel();
+    }
+
     private Result runSync(Context context, SyncSettings.Pairing pairing) {
         if (cancelled(context, pairing)) {
             return Result.success();
@@ -53,14 +68,14 @@ public final class ScreenshotWorker extends Worker {
         int uploaded = 0;
         int skipped = 0;
 
+        ReceiverConnection receiver = null;
         try (DeliveryReceipts receipts = new DeliveryReceipts(context);
-             Cursor cursor = ScreenshotCatalog.query(resolver, pairing)) {
+             Cursor cursor = ScreenshotCatalog.query(resolver, pairing, readCancellation)) {
             if (cursor == null) {
                 SyncSettings.status(context, pairing, R.string.status_read_error);
                 return retryThenWait();
             }
 
-            ReceiverConnection receiver = null;
             while (cursor.moveToNext()) {
                 if (cancelled(context, pairing)) {
                     return Result.success();
@@ -78,6 +93,10 @@ public final class ScreenshotWorker extends Worker {
                 }
                 if (receiver == null) {
                     receiver = new ReceiverConnection(context, pairing.host(), pairing.code());
+                    activeReceiver = receiver;
+                    if (cancelled(context, pairing)) {
+                        return Result.success();
+                    }
                     int test = receiver.test();
                     if (test != 200) {
                         return serverError(context, pairing, test);
@@ -86,7 +105,8 @@ public final class ScreenshotWorker extends Worker {
 
                 int response;
                 try {
-                    response = receiver.upload(resolver, screenshot, () -> cancelled(context, pairing));
+                    response = receiver.upload(resolver, screenshot, readCancellation,
+                        () -> cancelled(context, pairing));
                 } catch (FileNotFoundException missing) {
                     // A screenshot deleted while a scan was in progress is no longer eligible.
                     continue;
@@ -100,6 +120,8 @@ public final class ScreenshotWorker extends Worker {
                     return serverError(context, pairing, response);
                 }
             }
+        } catch (OperationCanceledException stopped) {
+            return Result.success();
         } catch (SecurityException denied) {
             SyncSettings.status(context, pairing, R.string.status_read_error);
             return Result.success();
@@ -109,6 +131,11 @@ public final class ScreenshotWorker extends Worker {
             }
             SyncSettings.status(context, pairing, R.string.status_network);
             return retryThenWait();
+        } finally {
+            if (receiver != null) {
+                receiver.close();
+                activeReceiver = null;
+            }
         }
 
         if (skipped > 0) {

@@ -4,6 +4,7 @@ import android.content.ContentResolver;
 import android.content.ContentUris;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.CancellationSignal;
 import android.provider.MediaStore;
 
 import java.time.Instant;
@@ -29,13 +30,12 @@ final class ScreenshotCatalog {
 
     record Screenshot(Uri uri, String id, String filename, String type, long size) {}
 
-    static Cursor query(ContentResolver resolver, SyncSettings.Pairing pairing) {
-        long sinceSeconds = pairing.history() ? 0 : pairing.since() / 1000;
-        String filter = MediaStore.Images.Media.IS_PENDING + " = 0 AND "
-            + "(" + DATE + " >= ? OR (? = '0' AND " + DATE + " IS NULL))";
+    static Cursor query(ContentResolver resolver, SyncSettings.Pairing pairing, CancellationSignal cancellation) {
+        long sinceSeconds = pairing.launchStartedAt() / 1000;
+        String filter = MediaStore.Images.Media.IS_PENDING + " = 0 AND " + DATE + " >= ?";
         return resolver.query(IMAGES, PROJECTION, filter,
-            new String[] { Long.toString(sinceSeconds), Long.toString(sinceSeconds) },
-            DATE + " ASC, " + ID + " ASC");
+            new String[] { Long.toString(sinceSeconds) },
+            DATE + " ASC, " + ID + " ASC", cancellation);
     }
 
     static Screenshot read(Cursor cursor, SyncSettings.Pairing pairing) {
@@ -50,9 +50,7 @@ final class ScreenshotCatalog {
         if (!looksLikeScreenshot(path, name)) {
             return null;
         }
-        if (!pairing.history() && (takenMillis > 0
-            ? takenMillis < pairing.since()
-            : addedSeconds <= pairing.since() / 1000)) {
+        if (takenMillis > 0 ? takenMillis < pairing.launchStartedAt() : addedSeconds <= pairing.launchStartedAt() / 1000) {
             return null;
         }
 

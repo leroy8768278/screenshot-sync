@@ -7,13 +7,12 @@ struct Receiver: Codable, Equatable {
     let address: String
     let port: Int
     let code: String
-    let startDate: Date?
     var automatic: Bool
 
     var displayAddress: String { "\(address):\(port)" }
     var historyKey: String { digest(code) }
 
-    init(address: String, port: String, code: String, startDate: Date?, automatic: Bool) throws {
+    init(address: String, port: String, code: String, automatic: Bool) throws {
         let address = address.trimmingCharacters(in: .whitespacesAndNewlines)
         var binaryAddress = in_addr()
         guard inet_pton(AF_INET, address, &binaryAddress) == 1 else {
@@ -41,7 +40,6 @@ struct Receiver: Codable, Equatable {
         self.address = address
         self.port = port
         self.code = code
-        self.startDate = startDate
         self.automatic = automatic
     }
 
@@ -121,8 +119,7 @@ enum ReceiverStore {
         guard status == errSecSuccess, let data = result as? Data else { throw SyncIssue.storage }
         let receiver = try JSONDecoder().decode(Receiver.self, from: data)
         return try Receiver(
-            address: receiver.address, port: String(receiver.port), code: receiver.code,
-            startDate: receiver.startDate, automatic: receiver.automatic
+            address: receiver.address, port: String(receiver.port), code: receiver.code, automatic: receiver.automatic
         )
     }
 

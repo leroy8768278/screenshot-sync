@@ -6,6 +6,7 @@ export class Receiver {
   private session: rcp.Session;
   private baseURL: string;
   private authorization: string;
+  private closed: boolean = false;
 
   constructor(host: string, token: string) {
     this.baseURL = `http://${host}:${RECEIVER_PORT}`;
@@ -53,12 +54,34 @@ export class Receiver {
     }
   }
 
+  cancel(): void {
+    if (this.closed) {
+      return;
+    }
+    try {
+      this.session.cancel();
+    } catch (_error) {
+      // The native session may already have stopped.
+    }
+    this.close();
+  }
+
   close(): void {
-    this.session.close();
+    if (!this.closed) {
+      this.closed = true;
+      try {
+        this.session.close();
+      } catch (_error) {
+        // The native session may already have closed.
+      }
+    }
   }
 
   private async fetch(request: rcp.Request): Promise<rcp.Response> {
     await requireLocalNetwork();
+    if (this.closed) {
+      throw new Error('同步已停止');
+    }
     try {
       return await this.session.fetch(request);
     } catch (_error) {

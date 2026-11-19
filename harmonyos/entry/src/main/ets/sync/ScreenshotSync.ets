@@ -14,22 +14,51 @@ export class SyncResult {
   skipped: number = 0;
 }
 
+export class SyncCancellation {
+  private cancelled: boolean = false;
+  private receiver: Receiver | undefined;
+
+  get stopped(): boolean {
+    return this.cancelled;
+  }
+
+  attach(receiver: Receiver): void {
+    this.receiver = receiver;
+  }
+
+  stop(): void {
+    this.cancelled = true;
+    this.receiver?.cancel();
+  }
+}
+
 export function galleryAllowed(context: common.Context): boolean {
   const tokenId: number = context.applicationInfo.accessTokenId;
   const manager: abilityAccessCtrl.AtManager = abilityAccessCtrl.createAtManager();
   return manager.checkAccessTokenSync(tokenId, GALLERY_PERMISSION) === abilityAccessCtrl.GrantStatus.PERMISSION_GRANTED;
 }
 
+export function isCurrentSync(context: common.Context, pairing: Pairing): boolean {
+  const current: Pairing | undefined = loadPairing(context);
+  return pairing.sessionStartedMs !== undefined && current?.enabled === true &&
+    current.sessionStartedMs === pairing.sessionStartedMs && current.revision === pairing.revision &&
+    current.destination === pairing.destination && current.host === pairing.host;
+}
+
 export async function syncScreenshots(
   context: common.Context,
   pairing: Pairing,
-  canContinue: () => boolean
+  cancellation: SyncCancellation
 ): Promise<SyncResult> {
+  const result = new SyncResult();
+  const startedMs: number | undefined = pairing.sessionStartedMs;
+  if (startedMs === undefined || cancellation.stopped || !isCurrentSync(context, pairing)) {
+    return result;
+  }
   if (!galleryAllowed(context)) {
     throw new Error('请授权读取相册，以便查找系统截图');
   }
 
-  const result = new SyncResult();
   const receiptFolder: string = context.getApplicationContext().filesDir;
   const helper: photoAccessHelper.PhotoAccessHelper = photoAccessHelper.getPhotoAccessHelper(context);
   const albumPredicates = new dataSharePredicates.DataSharePredicates();
@@ -41,20 +70,21 @@ export async function syncScreenshots(
   );
   let album: photoAccessHelper.Album;
   try {
-    if (albums.getCount() === 0 || !canContinue()) {
+    if (albums.getCount() === 0 || cancellation.stopped) {
       return result;
     }
     album = await albums.getFirstObject();
   } finally {
     albums.close();
   }
+  if (cancellation.stopped) {
+    return result;
+  }
 
   const photoPredicates = new dataSharePredicates.DataSharePredicates();
   photoPredicates.equalTo(photoAccessHelper.PhotoKeys.PHOTO_TYPE, photoAccessHelper.PhotoType.IMAGE);
   photoPredicates.notEqualTo(photoAccessHelper.PhotoKeys.POSITION, photoAccessHelper.PositionType.CLOUD);
-  if (pairing.sinceMs > 0) {
-    photoPredicates.greaterThanOrEqualTo(photoAccessHelper.PhotoKeys.DATE_ADDED, Math.floor(pairing.sinceMs / 1000));
-  }
+  photoPredicates.greaterThanOrEqualTo(photoAccessHelper.PhotoKeys.DATE_ADDED, Math.floor(startedMs / 1000));
   photoPredicates.orderByAsc(photoAccessHelper.PhotoKeys.DATE_ADDED);
   const assets: photoAccessHelper.FetchResult<photoAccessHelper.PhotoAsset> = await album.getAssets({
     fetchColumns: [photoAccessHelper.PhotoKeys.DATE_ADDED, photoAccessHelper.PhotoKeys.DATE_ADDED_MS],
@@ -64,14 +94,17 @@ export async function syncScreenshots(
   let receiver: Receiver | undefined;
   try {
     const count: number = assets.getCount();
-    for (let index = 0; index < count && canContinue(); index++) {
+    for (let index = 0; index < count && !cancellation.stopped; index++) {
       const asset: photoAccessHelper.PhotoAsset = await assets.getObjectByPosition(index);
+      if (cancellation.stopped) {
+        break;
+      }
       const date = asset.get(photoAccessHelper.PhotoKeys.DATE_ADDED_MS);
       if (typeof date !== 'number' || !Number.isSafeInteger(date) || date <= 0) {
         result.skipped++;
         continue;
       }
-      if (date < pairing.sinceMs) {
+      if (date <= startedMs) {
         continue;
       }
 
@@ -90,19 +123,21 @@ export async function syncScreenshots(
 
       let image: ArrayBuffer;
       try {
-        image = await readImage(asset.uri);
+        image = await readImage(asset.uri, cancellation);
       } catch (_error) {
+        if (cancellation.stopped) {
+          break;
+        }
         result.skipped++;
         continue;
       }
 
-      const current: Pairing | undefined = loadPairing(context);
-      if (!canContinue() || !current || !current.enabled || current.destination !== pairing.destination ||
-        current.host !== pairing.host) {
+      if (cancellation.stopped || !isCurrentSync(context, pairing)) {
         break;
       }
       if (!receiver) {
         receiver = new Receiver(pairing.host, pairing.token);
+        cancellation.attach(receiver);
       }
       const filename: string = `Screenshot-${date}-${idMatch[1]}.${format.extension}`;
       if (await receiver.upload(id, filename, format, image)) {
@@ -121,7 +156,7 @@ export async function syncScreenshots(
   }
 }
 
-async function readImage(uri: string): Promise<ArrayBuffer> {
+async function readImage(uri: string, cancellation: SyncCancellation): Promise<ArrayBuffer> {
   const file: fileIo.File = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
   try {
     const stat: fileIo.Stat = await fileIo.stat(file.fd);
@@ -133,6 +168,9 @@ async function readImage(uri: string): Promise<ArrayBuffer> {
     const chunk = new ArrayBuffer(Math.min(256 * 1024, stat.size));
     let offset: number = 0;
     while (offset < stat.size) {
+      if (cancellation.stopped) {
+        throw new Error('同步已停止');
+      }
       const length: number = Math.min(chunk.byteLength, stat.size - offset);
       const read: number = await fileIo.read(file.fd, chunk, { offset: offset, length: length });
       if (read <= 0) {

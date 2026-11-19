@@ -1,9 +1,9 @@
 import { abilityAccessCtrl, common } from '@kit.AbilityKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
-import { createPairing, loadPairing, Pairing, savePairing } from '../sync/Pairing';
+import { createPairing, loadPairing, Pairing, savePairing, SYNC_SESSION_START, withSyncEnabled } from '../sync/Pairing';
 import { isPairingCode, parseReceiverHost, RECEIVER_PORT } from '../sync/Protocol';
 import { Receiver } from '../sync/Receiver';
-import { GALLERY_PERMISSION, galleryAllowed, syncScreenshots, SyncResult } from '../sync/ScreenshotSync';
+import { GALLERY_PERMISSION, galleryAllowed, syncScreenshots, SyncCancellation, SyncResult } from '../sync/ScreenshotSync';
 import { updateSchedule } from '../work/Schedule';
 
 const BLUE: string = '#2359D7';
@@ -16,7 +16,6 @@ struct Index {
   @StorageProp('syncForeground') @Watch('foregroundChanged') private foreground: boolean = false;
   @State private host: string = '';
   @State private token: string = '';
-  @State private includeExisting: boolean = false;
   @State private syncEnabled: boolean = false;
   @State private hasPairing: boolean = false;
   @State private activeHost: string = '';
@@ -34,7 +33,8 @@ struct Index {
   private helper: photoAccessHelper.PhotoAccessHelper | undefined;
   private interval: number = -1;
   private debounce: number = -1;
-  private generation: number = 0;
+  private activeSync: SyncCancellation | undefined;
+  private scheduleUpdate: Promise<void> = Promise.resolve();
   private pageReady: boolean = false;
 
   private onPhotoChange = (_change: photoAccessHelper.PhotoAssetChangeInfos): void => {
@@ -55,7 +55,7 @@ struct Index {
         this.host = this.pairing.host;
         this.token = this.pairing.token;
         this.applyPairing(this.pairing);
-        this.status = this.syncEnabled ? '等待同步' : '已暂停';
+        this.status = this.syncEnabled ? '等待同步' : '同步已停止';
       }
       this.foregroundChanged();
     } catch (_error) {
@@ -75,6 +75,11 @@ struct Index {
     this.activeHost = pairing.host;
   }
 
+  private hasCurrentSession(pairing: Pairing | undefined): boolean {
+    return pairing?.sessionStartedMs !== undefined &&
+      pairing.sessionStartedMs === AppStorage.get<number>(SYNC_SESSION_START);
+  }
+
   private foregroundChanged(): void {
     if (!this.pageReady || !this.foreground) {
       this.stopListening();
@@ -82,8 +87,10 @@ struct Index {
     }
     this.refreshPermission();
     this.startListening();
-    if (this.syncEnabled) {
+    if (this.hasPairing) {
       this.refreshSchedule();
+    }
+    if (this.syncEnabled) {
       this.sync();
     }
   }
@@ -97,7 +104,8 @@ struct Index {
   }
 
   private startListening(): void {
-    if (!this.foreground || !this.syncEnabled || !this.galleryGranted || this.interval !== -1) {
+    if (!this.foreground || !this.syncEnabled || !this.galleryGranted || !this.hasCurrentSession(this.pairing) ||
+      this.interval !== -1) {
       return;
     }
     this.interval = setInterval((): void => {
@@ -113,7 +121,9 @@ struct Index {
   }
 
   private stopListening(): void {
-    this.generation++;
+    this.activeSync?.stop();
+    this.activeSync = undefined;
+    this.uploading = false;
     if (this.interval !== -1) {
       clearInterval(this.interval);
       this.interval = -1;
@@ -181,6 +191,11 @@ struct Index {
       this.status = '请输入 Mac 接收端显示的 24 位配对码';
       return;
     }
+    const startedMs: number | undefined = AppStorage.get<number>(SYNC_SESSION_START);
+    if (startedMs === undefined) {
+      this.status = '无法确定本次启动时间，请重新打开应用';
+      return;
+    }
 
     this.changingSettings = true;
     this.status = '正在连接 Mac…';
@@ -189,13 +204,12 @@ struct Index {
       receiver = new Receiver(host, token);
       await receiver.verify();
       await this.authorizeGallery();
-      const pairing: Pairing = createPairing(host, token, this.includeExisting, this.pairing);
+      const pairing: Pairing = createPairing(host, token, startedMs, this.pairing);
       savePairing(this.getContext(), pairing);
       this.applyPairing(pairing);
       this.host = host;
       this.token = token;
-      this.includeExisting = false;
-      this.status = 'Mac 已配对';
+      this.status = pairing.enabled ? 'Mac 已配对' : '同步已停止';
       await this.refreshSchedule();
       this.startListening();
     } catch (error) {
@@ -208,40 +222,56 @@ struct Index {
     this.sync();
   }
 
-  private async pause(): Promise<void> {
+  private async setSyncEnabled(enabled: boolean): Promise<void> {
     const previous: Pairing | undefined = this.pairing;
-    if (!previous || this.changingSettings) {
+    if (!previous || this.changingSettings || previous.enabled === enabled) {
       return;
     }
     this.changingSettings = true;
     try {
-      const paused = new Pairing(previous.host, previous.token, previous.sinceMs,
-        previous.installation, previous.destination, false);
-      savePairing(this.getContext(), paused);
-      this.applyPairing(paused);
-      this.stopListening();
-      this.status = '已暂停';
+      const pairing: Pairing = withSyncEnabled(previous, enabled);
+      savePairing(this.getContext(), pairing);
+      this.applyPairing(pairing);
+      if (enabled) {
+        this.refreshPermission();
+        this.startListening();
+        this.status = '等待同步';
+      } else {
+        this.stopListening();
+        this.status = '同步已停止';
+      }
       await this.refreshSchedule();
     } catch (_error) {
-      this.status = '未能保存暂停设置';
+      this.status = enabled ? '未能继续同步' : '未能停止同步';
     } finally {
       this.changingSettings = false;
     }
+    if (enabled) {
+      this.sync();
+    }
   }
 
-  private async refreshSchedule(): Promise<void> {
-    const enabled: boolean = this.syncEnabled && this.galleryGranted;
-    try {
-      await updateSchedule(this.getContext().abilityInfo.bundleName, enabled);
-      this.scheduleStatus = enabled ? '后台补传由系统择机执行。' : '';
-    } catch (_error) {
-      this.scheduleStatus = enabled ? '后台补传未能注册，打开应用时仍会同步。' : '';
-    }
+  private refreshSchedule(): Promise<void> {
+    this.scheduleUpdate = this.scheduleUpdate.then(async (): Promise<void> => {
+      const revision: number | undefined = this.syncEnabled && this.galleryGranted &&
+        this.hasCurrentSession(this.pairing) ? this.pairing?.revision : undefined;
+      try {
+        await updateSchedule(this.getContext().abilityInfo.bundleName, revision);
+        this.scheduleStatus = revision !== undefined ? '后台补传由系统择机执行。' : '';
+      } catch (_error) {
+        this.scheduleStatus = revision !== undefined ? '后台补传未能注册，打开应用时仍会同步。' : '';
+      }
+    });
+    return this.scheduleUpdate;
   }
 
   private async sync(): Promise<void> {
     const pairing: Pairing | undefined = this.pairing;
     if (!pairing?.enabled || !this.foreground || this.uploading || this.changingSettings) {
+      return;
+    }
+    if (!this.hasCurrentSession(pairing)) {
+      this.status = '无法开始本次同步，请重新验证连接';
       return;
     }
     this.refreshPermission();
@@ -250,14 +280,14 @@ struct Index {
       this.status = '等待相册授权';
       return;
     }
-    const generation: number = this.generation;
+    const cancellation = new SyncCancellation();
     const previousStatus: string = this.status;
+    this.activeSync = cancellation;
     this.uploading = true;
     this.status = '正在检查系统截图…';
     try {
-      const result: SyncResult = await syncScreenshots(this.getContext(), pairing,
-        (): boolean => this.syncEnabled && this.foreground && this.generation === generation);
-      if (this.generation === generation) {
+      const result: SyncResult = await syncScreenshots(this.getContext(), pairing, cancellation);
+      if (this.activeSync === cancellation) {
         if (result.skipped > 0) {
           this.status = `本次同步 ${result.uploaded} 张，${result.skipped} 张暂未处理`;
         } else if (result.uploaded > 0) {
@@ -267,11 +297,14 @@ struct Index {
         }
       }
     } catch (error) {
-      if (this.generation === generation) {
+      if (this.activeSync === cancellation) {
         this.status = error instanceof Error ? error.message : '同步暂不可用，稍后自动重试';
       }
     } finally {
-      this.uploading = false;
+      if (this.activeSync === cancellation) {
+        this.activeSync = undefined;
+        this.uploading = false;
+      }
     }
   }
 
@@ -323,12 +356,17 @@ struct Index {
                   .enabled(!this.uploading && !this.changingSettings)
                   .onClick(() => { this.sync(); })
               }
-              Button('暂停')
+              Button('停止同步')
                 .backgroundColor('#EAF0FF')
                 .fontColor(INK)
                 .enabled(!this.changingSettings)
-                .onClick(() => { this.pause(); })
+                .onClick(() => { this.setSyncEnabled(false); })
             }
+          } else if (this.hasPairing) {
+            Button('继续同步')
+              .backgroundColor(BLUE)
+              .enabled(!this.changingSettings)
+              .onClick(() => { this.setSyncEnabled(true); })
           }
         }
         .alignItems(HorizontalAlign.Start)
@@ -367,19 +405,7 @@ struct Index {
             .maxLength(24)
             .enabled(!this.changingSettings)
             .onChange((value: string) => { this.token = value; })
-          if (!this.hasPairing || this.token.trim().toLowerCase() !== this.pairing?.token) {
-            Row({ space: 6 }) {
-              Checkbox()
-                .select(this.includeExisting)
-                .selectedColor(BLUE)
-                .accessibilityText('同时同步已有截图')
-                .onChange((value: boolean) => { this.includeExisting = value; })
-              Text('同时同步已有截图')
-                .fontSize(15)
-                .fontColor(INK)
-            }
-          }
-          Button(this.syncEnabled ? '验证并保存' : this.hasPairing ? '恢复同步' : '配对并开启同步')
+          Button(this.hasPairing ? '验证并保存' : '配对并开启同步')
             .width('100%')
             .backgroundColor(BLUE)
             .fontSize(16)

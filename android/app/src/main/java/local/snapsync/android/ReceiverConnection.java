@@ -6,6 +6,7 @@ import android.content.res.AssetFileDescriptor;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
+import android.os.CancellationSignal;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -16,7 +17,7 @@ import java.net.Proxy;
 import java.net.URL;
 import java.util.function.BooleanSupplier;
 
-final class ReceiverConnection {
+final class ReceiverConnection implements AutoCloseable {
     static final long MAX_BYTES = 64L * 1024L * 1024L;
     private static final int CONNECT_TIMEOUT_MS = 4_000;
     private static final int READ_TIMEOUT_MS = 12_000;
@@ -24,6 +25,8 @@ final class ReceiverConnection {
     private final Network network;
     private final String host;
     private final String code;
+    private HttpURLConnection activeConnection;
+    private boolean closed;
 
     ReceiverConnection(Context context, String host, String code) throws IOException {
         this.host = SyncSettings.localHost(host);
@@ -40,13 +43,13 @@ final class ReceiverConnection {
             connection.setRequestMethod("GET");
             return connection.getResponseCode();
         } finally {
-            connection.disconnect();
+            release(connection);
         }
     }
 
     int upload(ContentResolver resolver, ScreenshotCatalog.Screenshot screenshot,
-               BooleanSupplier cancelled) throws IOException {
-        AssetFileDescriptor descriptor = resolver.openAssetFileDescriptor(screenshot.uri(), "r");
+               CancellationSignal readCancellation, BooleanSupplier cancelled) throws IOException {
+        AssetFileDescriptor descriptor = resolver.openAssetFileDescriptor(screenshot.uri(), "r", readCancellation);
         if (descriptor == null) {
             throw new FileNotFoundException("Screenshot is no longer available");
         }
@@ -61,6 +64,7 @@ final class ReceiverConnection {
             if (length > MAX_BYTES) {
                 return 413;
             }
+            checkCancelled(cancelled);
 
             HttpURLConnection connection = open("/v1/screenshots");
             try {
@@ -75,15 +79,13 @@ final class ReceiverConnection {
                     byte[] buffer = new byte[64 * 1024];
                     int count;
                     while ((count = input.read(buffer)) != -1) {
-                        if (cancelled.getAsBoolean()) {
-                            throw new IOException("Sync interrupted");
-                        }
+                        checkCancelled(cancelled);
                         output.write(buffer, 0, count);
                     }
                 }
                 return connection.getResponseCode();
             } finally {
-                connection.disconnect();
+                release(connection);
             }
         }
     }
@@ -95,7 +97,42 @@ final class ReceiverConnection {
         connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
         connection.setReadTimeout(READ_TIMEOUT_MS);
         connection.setRequestProperty("Authorization", "Bearer " + code);
+        synchronized (this) {
+            if (closed) {
+                throw new IOException("Sync interrupted");
+            }
+            activeConnection = connection;
+        }
         return connection;
+    }
+
+    @Override
+    public void close() {
+        HttpURLConnection connection;
+        synchronized (this) {
+            closed = true;
+            connection = activeConnection;
+            activeConnection = null;
+        }
+        if (connection != null) {
+            connection.disconnect();
+        }
+    }
+
+    private void release(HttpURLConnection connection) {
+        synchronized (this) {
+            if (activeConnection != connection) {
+                return;
+            }
+            activeConnection = null;
+        }
+        connection.disconnect();
+    }
+
+    private static void checkCancelled(BooleanSupplier cancelled) throws IOException {
+        if (cancelled.getAsBoolean()) {
+            throw new IOException("Sync interrupted");
+        }
     }
 
     private static Network findLocalNetwork(Context context) throws IOException {

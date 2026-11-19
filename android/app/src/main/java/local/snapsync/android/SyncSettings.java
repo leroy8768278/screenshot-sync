@@ -15,20 +15,25 @@ final class SyncSettings {
     private static final String HOST = "host";
     private static final String CODE = "code";
     private static final String AUTO = "auto";
-    private static final String SINCE = "since";
-    private static final String HISTORY = "history";
+    private static final String PAUSED = "paused";
+    private static final String LAUNCH_STARTED_AT = "launch_started_at";
     private static final String GENERATION = "generation";
     private static final String INSTALLATION = "installation";
     private static final Object SETTINGS_LOCK = new Object();
+    private static boolean launchRecorded;
 
-    record Pairing(String host, String code, boolean automatic, long since,
-                   boolean history, String generation, String installation) {
+    record Pairing(String host, String code, boolean automatic, boolean paused, long launchStartedAt,
+                   String generation, String installation) {
         boolean isConfigured() {
             return !host.isEmpty() && !code.isEmpty();
         }
 
         String receiverId() {
             return digest(code);
+        }
+
+        boolean canSync(boolean manual) {
+            return isConfigured() && launchStartedAt > 0 && !paused && (manual || automatic);
         }
     }
 
@@ -43,35 +48,59 @@ final class SyncSettings {
                 prefs.getString(HOST, ""),
                 prefs.getString(CODE, ""),
                 prefs.getBoolean(AUTO, true),
-                prefs.getLong(SINCE, 0),
-                prefs.getBoolean(HISTORY, false),
+                prefs.getBoolean(PAUSED, false),
+                prefs.getLong(LAUNCH_STARTED_AT, 0),
                 prefs.getString(GENERATION, ""),
                 prefs.getString(INSTALLATION, "")
             );
         }
     }
 
-    static boolean save(Context context, String host, String code, boolean automatic, boolean history) {
+    static boolean startLaunch(Context context) {
+        synchronized (SETTINGS_LOCK) {
+            if (launchRecorded) {
+                return false;
+            }
+            launchRecorded = true;
+            preferences(context).edit()
+                .putLong(LAUNCH_STARTED_AT, System.currentTimeMillis())
+                .putString(GENERATION, UUID.randomUUID().toString())
+                .apply();
+            return true;
+        }
+    }
+
+    static boolean save(Context context, String host, String code, boolean automatic) {
         synchronized (SETTINGS_LOCK) {
             Pairing old = read(context);
-            boolean unchanged = old.host.equals(host) && old.code.equals(code)
-                && old.automatic == automatic && old.history == history;
+            boolean unchanged = old.host.equals(host) && old.code.equals(code) && old.automatic == automatic;
             if (unchanged) {
                 return true;
             }
 
-            long since = old.since > 0 && old.code.equals(code) ? old.since : System.currentTimeMillis();
             String installation = old.installation.isEmpty()
                 ? UUID.randomUUID().toString() : old.installation;
             return preferences(context).edit()
                 .putString(HOST, host)
                 .putString(CODE, code)
                 .putBoolean(AUTO, automatic)
-                .putBoolean(HISTORY, history)
-                .putLong(SINCE, since)
                 .putString(GENERATION, UUID.randomUUID().toString())
                 .putString(INSTALLATION, installation)
-                .putString(STATUS, context.getString(R.string.status_saved))
+                .putString(STATUS, context.getString(old.paused ? R.string.status_paused : R.string.status_saved))
+                .commit();
+        }
+    }
+
+    static boolean setPaused(Context context, boolean paused) {
+        synchronized (SETTINGS_LOCK) {
+            Pairing pairing = read(context);
+            if (!pairing.isConfigured()) {
+                return false;
+            }
+            return preferences(context).edit()
+                .putBoolean(PAUSED, paused)
+                .putString(GENERATION, UUID.randomUUID().toString())
+                .putString(STATUS, context.getString(paused ? R.string.status_paused : R.string.status_saved))
                 .commit();
         }
     }

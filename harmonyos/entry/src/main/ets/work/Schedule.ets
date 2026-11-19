@@ -1,20 +1,29 @@
 import { workScheduler } from '@kit.BackgroundTasksKit';
 
-const WORK_ID: number = 43871;
+const LEGACY_WORK_ID: number = 43871;
+const ABILITY_NAME: string = 'ScreenshotSyncWork';
 
-export async function updateSchedule(bundleName: string, enabled: boolean): Promise<void> {
+export function scheduledWorkId(revision: number): number {
+  // Each settings revision has its own ID so a delayed stop cannot cancel its replacement.
+  return LEGACY_WORK_ID + (revision % 1_000_000_000);
+}
+
+export async function updateSchedule(bundleName: string, revision: number | undefined): Promise<void> {
+  const workId: number | undefined = revision === undefined ? undefined : scheduledWorkId(revision);
   const tasks: workScheduler.WorkInfo[] = await workScheduler.obtainAllWorks();
-  const existing: workScheduler.WorkInfo | undefined = tasks.find(
-    (item: workScheduler.WorkInfo): boolean => item.workId === WORK_ID
+  const syncTasks: workScheduler.WorkInfo[] = tasks.filter(
+    (item: workScheduler.WorkInfo): boolean => item.abilityName === ABILITY_NAME
   );
-  if (!enabled && existing) {
-    workScheduler.stopWork(existing, true);
+  for (const task of syncTasks) {
+    if (task.workId !== workId) {
+      workScheduler.stopWork(task, true);
+    }
   }
-  if (enabled && !existing) {
+  if (workId !== undefined && !syncTasks.some((task: workScheduler.WorkInfo): boolean => task.workId === workId)) {
     workScheduler.startWork({
-      workId: WORK_ID,
+      workId: workId,
       bundleName: bundleName,
-      abilityName: 'ScreenshotSyncWork',
+      abilityName: ABILITY_NAME,
       networkType: workScheduler.NetworkType.NETWORK_TYPE_WIFI,
       isRepeat: true,
       repeatCycleTime: 2 * 60 * 60 * 1000,

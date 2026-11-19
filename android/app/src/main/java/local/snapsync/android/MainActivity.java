@@ -30,7 +30,12 @@ import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
 
+import androidx.lifecycle.LiveData;
+import androidx.lifecycle.Observer;
+import androidx.work.WorkInfo;
+
 import java.io.IOException;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -47,7 +52,6 @@ public final class MainActivity extends Activity {
     private static final int HOST_ID = View.generateViewId();
     private static final int CODE_ID = View.generateViewId();
     private static final int AUTO_ID = View.generateViewId();
-    private static final int HISTORY_ID = View.generateViewId();
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService testExecutor = Executors.newSingleThreadExecutor();
@@ -68,7 +72,6 @@ public final class MainActivity extends Activity {
     private EditText hostInput;
     private EditText codeInput;
     private Switch automaticInput;
-    private Switch historyInput;
     private TextView testStatus;
     private TextView syncStatus;
     private TextView permissionStatus;
@@ -76,11 +79,21 @@ public final class MainActivity extends Activity {
     private Button requestPermissionButton;
     private Button openSettingsButton;
     private Button syncButton;
+    private Button syncControlButton;
     private boolean observerRegistered;
+    private boolean manualSyncPending;
+    private LiveData<List<WorkInfo>> manualWork;
+    private final Observer<List<WorkInfo>> manualWorkObserver = work -> {
+        manualSyncPending = work.stream().anyMatch(info -> !info.getState().isFinished());
+        refreshSyncControls();
+    };
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        if (SyncSettings.startLaunch(this)) {
+            SyncScheduler.cancelAll(this);
+        }
         if (Build.VERSION.SDK_INT >= 30) {
             getWindow().setDecorFitsSystemWindows(false);
         }
@@ -92,7 +105,6 @@ public final class MainActivity extends Activity {
             codeInput.setText(pairing.code());
         }
         automaticInput.setChecked(pairing.automatic());
-        historyInput.setChecked(pairing.history());
         SyncScheduler.configure(this, pairing);
         showSavedStatus();
     }
@@ -101,6 +113,8 @@ public final class MainActivity extends Activity {
     protected void onStart() {
         super.onStart();
         SyncSettings.preferences(this).registerOnSharedPreferenceChangeListener(statusListener);
+        manualWork = SyncScheduler.manualWork(this);
+        manualWork.observeForever(manualWorkObserver);
         showSavedStatus();
     }
 
@@ -121,6 +135,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onStop() {
         SyncSettings.preferences(this).unregisterOnSharedPreferenceChangeListener(statusListener);
+        manualWork.removeObserver(manualWorkObserver);
         super.onStop();
     }
 
@@ -172,8 +187,8 @@ public final class MainActivity extends Activity {
         title.setAccessibilityHeading(true);
         add(page, title, 0);
         add(page, label(R.string.subtitle, 14, MUTED, false), 6);
-        add(page, pairingCard(), 22);
-        add(page, statusCard(), 12);
+        add(page, statusCard(), 22);
+        add(page, pairingCard(), 12);
         add(page, label(R.string.background_hint, 12, MUTED, false), 14);
         return scroll;
     }
@@ -208,9 +223,7 @@ public final class MainActivity extends Activity {
         add(card, codeRow, 6);
 
         automaticInput = toggle(AUTO_ID, R.string.automatic);
-        historyInput = toggle(HISTORY_ID, R.string.history);
         add(card, automaticInput, 12);
-        add(card, historyInput, 0);
 
         testButton = button(R.string.test, false);
         testButton.setOnClickListener(view -> testConnection());
@@ -240,7 +253,9 @@ public final class MainActivity extends Activity {
 
         syncButton = button(R.string.sync, true);
         syncButton.setOnClickListener(view -> syncNow());
-        add(card, syncButton, 12);
+        syncControlButton = button(R.string.stop_sync, false);
+        syncControlButton.setOnClickListener(view -> toggleSyncPause());
+        add(card, actionRow(syncButton, syncControlButton), 12);
         return card;
     }
 
@@ -267,7 +282,7 @@ public final class MainActivity extends Activity {
         if (input == null) {
             return;
         }
-        if (!SyncSettings.save(this, input.host(), input.code(), automaticInput.isChecked(), historyInput.isChecked())) {
+        if (!SyncSettings.save(this, input.host(), input.code(), automaticInput.isChecked())) {
             showTestResult(R.string.save_failed, true);
             return;
         }
@@ -281,11 +296,9 @@ public final class MainActivity extends Activity {
         SyncSettings.Pairing pairing = SyncSettings.read(this);
         SyncScheduler.configure(this, pairing);
         refreshPermissions();
-        if (pairing.automatic() && PhotoAccess.current(this) != PhotoAccess.NONE) {
+        if (pairing.canSync(false) && PhotoAccess.current(this) != PhotoAccess.NONE) {
             SyncSettings.status(this, pairing, R.string.status_queued);
-            SyncScheduler.sync(this, false);
-        } else {
-            SyncSettings.status(this, pairing, R.string.status_saved);
+            SyncScheduler.sync(this, pairing, false);
         }
     }
 
@@ -325,18 +338,44 @@ public final class MainActivity extends Activity {
             syncStatus.setText(R.string.status_save_first);
             return;
         }
+        if (pairing.paused()) {
+            return;
+        }
         if (PhotoAccess.current(this) == PhotoAccess.NONE) {
             syncStatus.setText(R.string.permission_missing);
             return;
         }
         SyncSettings.status(this, pairing, R.string.status_queued);
-        SyncScheduler.sync(this, true);
+        SyncScheduler.sync(this, pairing, true);
+        manualSyncPending = true;
+        refreshSyncControls();
+    }
+
+    private void toggleSyncPause() {
+        SyncSettings.Pairing pairing = SyncSettings.read(this);
+        boolean pause = !pairing.paused();
+        if (!SyncSettings.setPaused(this, pause)) {
+            syncStatus.setText(R.string.save_failed);
+            return;
+        }
+        handler.removeCallbacks(scanOnChange);
+        SyncSettings.Pairing current = SyncSettings.read(this);
+        SyncScheduler.configure(this, current);
+        refreshPermissions();
+        if (!pause && PhotoAccess.current(this) != PhotoAccess.NONE) {
+            if (current.automatic()) {
+                SyncSettings.status(this, current, R.string.status_queued);
+                triggerForegroundSync();
+            } else {
+                syncNow();
+            }
+        }
     }
 
     private void triggerForegroundSync() {
         SyncSettings.Pairing pairing = SyncSettings.read(this);
-        if (pairing.isConfigured() && pairing.automatic() && PhotoAccess.current(this) != PhotoAccess.NONE) {
-            SyncScheduler.sync(this, false);
+        if (pairing.canSync(false) && PhotoAccess.current(this) != PhotoAccess.NONE) {
+            SyncScheduler.sync(this, pairing, false);
         }
     }
 
@@ -351,8 +390,16 @@ public final class MainActivity extends Activity {
             ? R.string.permission_button_partial : R.string.permission);
         requestPermissionButton.setVisibility(access == PhotoAccess.FULL ? View.GONE : View.VISIBLE);
         openSettingsButton.setVisibility(access == PhotoAccess.FULL ? View.GONE : View.VISIBLE);
-        syncButton.setEnabled(SyncSettings.read(this).isConfigured() && access != PhotoAccess.NONE);
-        updateObserver(access != PhotoAccess.NONE);
+        refreshSyncControls();
+        updateObserver(access != PhotoAccess.NONE && SyncSettings.read(this).canSync(false));
+    }
+
+    private void refreshSyncControls() {
+        SyncSettings.Pairing pairing = SyncSettings.read(this);
+        syncButton.setEnabled(pairing.canSync(true) && PhotoAccess.current(this) != PhotoAccess.NONE);
+        syncControlButton.setText(pairing.paused() ? R.string.resume_sync : R.string.stop_sync);
+        syncControlButton.setVisibility(pairing.isConfigured()
+            && (pairing.paused() || pairing.automatic() || manualSyncPending) ? View.VISIBLE : View.GONE);
     }
 
     private void updateObserver(boolean observe) {
@@ -378,6 +425,7 @@ public final class MainActivity extends Activity {
     private void showSavedStatus() {
         syncStatus.setText(SyncSettings.preferences(this).getString(
             SyncSettings.STATUS, getString(R.string.status_setup)));
+        refreshSyncControls();
     }
 
     private void showReceiverAddress(String host) {

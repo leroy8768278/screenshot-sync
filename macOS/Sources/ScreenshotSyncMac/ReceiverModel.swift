@@ -35,7 +35,7 @@ final class ReceiverModel: ObservableObject {
     @Published private(set) var folder: URL
     @Published private(set) var token: String
     @Published private(set) var addresses = [LocalAddress]()
-    @Published private(set) var recent = [ReceivedScreenshot]()
+    @Published private(set) var recent = [ScreenshotSource?: [ReceivedScreenshot]]()
     @Published var errorMessage: String?
 
     private let defaults: UserDefaults

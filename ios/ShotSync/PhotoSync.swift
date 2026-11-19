@@ -1,8 +1,11 @@
 import Photos
 import SwiftUI
 import UniformTypeIdentifiers
+import os
 
-struct ScreenshotData {
+struct ScreenshotData: Sendable {
+    fileprivate static let maxBytes = 64 * 1024 * 1024
+
     let bytes: Data
     let mimeType: String
     let fileExtension: String
@@ -22,26 +25,18 @@ struct ScreenshotData {
     }
 
     private static func loadResource(_ resource: PHAssetResource) async throws -> Self {
-        guard let type = UTType(resource.uniformTypeIdentifier), type.conforms(to: .image),
-              let mime = type.preferredMIMEType, mime.hasPrefix("image/"),
-              let ext = type.preferredFilenameExtension else {
-            throw SyncIssue.unsupportedImage
-        }
-        let output = URL.temporaryDirectory.appending(path: UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: output) }
+        let format = try imageFormat(resource.uniformTypeIdentifier)
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = false
-        do {
-            try await PHAssetResourceManager.default().writeData(for: resource, toFile: output, options: options)
-        } catch {
-            throw SyncIssue.unavailableImage
+        let request = PhotoReadRequest()
+        return try await request.read {
+            let id = PHAssetResourceManager.default().requestData(for: resource, options: options) { data in
+                request.append(data)
+            } completionHandler: { error in
+                request.finishResource(mimeType: format.mime, fileExtension: format.ext, failed: error != nil)
+            }
+            return { PHAssetResourceManager.default().cancelDataRequest(id) }
         }
-        try Task.checkCancellation()
-        let size = try output.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-        guard size > 0 else { throw SyncIssue.unavailableImage }
-        guard size <= 64 * 1024 * 1024 else { throw SyncIssue.imageTooLarge }
-        let data = try Data(contentsOf: output, options: .mappedIfSafe)
-        return Self(bytes: data, mimeType: mime, fileExtension: ext)
     }
 
     private static func loadCurrentImage(_ asset: PHAsset) async throws -> Self {
@@ -49,24 +44,108 @@ struct ScreenshotData {
         options.version = .current
         options.isNetworkAccessAllowed = false
 
-        return try await withCheckedThrowingContinuation { continuation in
-            PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, uti, _, _ in
+        let request = PhotoReadRequest()
+        return try await request.read {
+            let id = PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, uti, _, _ in
                 guard let data, !data.isEmpty else {
-                    continuation.resume(throwing: SyncIssue.unavailableImage)
+                    request.finish(.failure(SyncIssue.unavailableImage))
                     return
                 }
-                guard data.count <= 64 * 1024 * 1024 else {
-                    continuation.resume(throwing: SyncIssue.imageTooLarge)
+                guard data.count <= maxBytes else {
+                    request.finish(.failure(SyncIssue.imageTooLarge))
                     return
                 }
-                guard let uti, let type = UTType(uti), type.conforms(to: .image),
-                      let mime = type.preferredMIMEType, mime.hasPrefix("image/"),
-                      let ext = type.preferredFilenameExtension else {
-                    continuation.resume(throwing: SyncIssue.unsupportedImage)
-                    return
-                }
-                continuation.resume(returning: Self(bytes: data, mimeType: mime, fileExtension: ext))
+                request.finish(Result {
+                    let format = try imageFormat(uti)
+                    return Self(bytes: data, mimeType: format.mime, fileExtension: format.ext)
+                })
             }
+            return { PHImageManager.default().cancelImageRequest(id) }
+        }
+    }
+
+    private static func imageFormat(_ identifier: String?) throws -> (mime: String, ext: String) {
+        guard let identifier, let type = UTType(identifier), type.conforms(to: .image),
+              let mime = type.preferredMIMEType, mime.hasPrefix("image/"),
+              let ext = type.preferredFilenameExtension else {
+            throw SyncIssue.unsupportedImage
+        }
+        return (mime, ext)
+    }
+}
+
+// PhotoKit can complete a read on its own queue while the sync task is being cancelled.
+private final class PhotoReadRequest: Sendable {
+    typealias Cancel = @Sendable () -> Void
+    private struct State: Sendable {
+        var continuation: CheckedContinuation<ScreenshotData, Error>?
+        var cancelRead: Cancel?
+        var finished = false
+        var needsCancellation = false
+        var bytes = Data()
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    func read(_ start: () -> Cancel) async throws -> ScreenshotData {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let shouldStart = state.withLock { state in
+                    guard !state.finished else { return false }
+                    state.continuation = continuation
+                    return true
+                }
+                guard shouldStart else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                let cancel = start()
+                let needsCancellation = state.withLock { state in
+                    if !state.finished { state.cancelRead = cancel }
+                    return state.needsCancellation
+                }
+                if needsCancellation { cancel() }
+            }
+        } onCancel: {
+            self.resolve(cancelRead: true) { _ in .failure(CancellationError()) }
+        }
+    }
+
+    func append(_ data: Data) {
+        resolve(cancelRead: true) { state in
+            guard data.count <= ScreenshotData.maxBytes - state.bytes.count else {
+                return .failure(SyncIssue.imageTooLarge)
+            }
+            state.bytes.append(data)
+            return nil
+        }
+    }
+
+    func finishResource(mimeType: String, fileExtension: String, failed: Bool) {
+        resolve { state in
+            guard !failed, !state.bytes.isEmpty else { return .failure(SyncIssue.unavailableImage) }
+            return .success(ScreenshotData(bytes: state.bytes, mimeType: mimeType, fileExtension: fileExtension))
+        }
+    }
+
+    func finish(_ result: Result<ScreenshotData, Error>) {
+        resolve { _ in result }
+    }
+
+    private func resolve(
+        cancelRead: Bool = false,
+        _ result: @Sendable (inout State) -> Result<ScreenshotData, Error>?
+    ) {
+        let completion = state.withLock { state -> (CheckedContinuation<ScreenshotData, Error>?, Result<ScreenshotData, Error>, Cancel?)? in
+            guard !state.finished, let result = result(&state) else { return nil }
+            let completion = (state.continuation, result, cancelRead ? state.cancelRead : nil)
+            state = State(finished: true, needsCancellation: cancelRead)
+            return completion
+        }
+        if let (continuation, result, cancel) = completion {
+            continuation?.resume(with: result)
+            // A size limit can be reached from inside a PhotoKit callback.
+            if let cancel { DispatchQueue.global().async(execute: cancel) }
         }
     }
 }
@@ -82,6 +161,7 @@ private final class LibraryObserver: NSObject, PHPhotoLibraryChangeObserver {
 @MainActor
 final class PhotoSync: ObservableObject {
     static let shared = PhotoSync()
+    private static let sessionStartKey = "screenshotSyncSessionStart"
 
     @Published private(set) var receiver: Receiver?
     @Published private(set) var permission = PHPhotoLibrary.authorizationStatus(for: .readWrite)
@@ -93,16 +173,20 @@ final class PhotoSync: ObservableObject {
     private let observer = LibraryObserver()
     private var observingLibrary = false
     private var history: SyncHistory?
+    private var sessionStart: Date?
+    private var startedForegroundSession = false
     private var active = false
     private var scanAgain = false
+    private var runningScan: Task<Bool, Never>?
     private var pendingScan: Task<Void, Never>?
     private var retryEvent: Task<Void, Never>?
     private var retryDelay = 15
 
     var canReadPhotos: Bool { permission == .authorized || permission == .limited }
-    var acceptsBackgroundRefresh: Bool { receiver?.automatic == true && canReadPhotos }
+    var acceptsBackgroundRefresh: Bool { receiver?.automatic == true && canReadPhotos && sessionStart != nil }
 
     private init() {
+        sessionStart = UserDefaults.standard.object(forKey: Self.sessionStartKey) as? Date
         observer.sync = self
         reloadReceiver()
     }
@@ -144,16 +228,23 @@ final class PhotoSync: ObservableObject {
     }
 
     func setAutomatic(_ enabled: Bool) {
-        guard var receiver, !working else { return }
+        guard var receiver else { return }
         receiver.automatic = enabled
+        if !enabled {
+            self.receiver = receiver
+            scanAgain = false
+            pendingScan?.cancel()
+            pendingScan = nil
+            resetRetry()
+            BGRefresh.cancel()
+            runningScan?.cancel()
+        }
         do {
             try ReceiverStore.save(receiver)
-            self.receiver = receiver
+            errorMessage = nil
             if enabled {
+                self.receiver = receiver
                 libraryChanged()
-            } else {
-                BGRefresh.cancel()
-                resetRetry()
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -169,6 +260,13 @@ final class PhotoSync: ObservableObject {
         active = phase == .active
         updatePhotoAccess(PHPhotoLibrary.authorizationStatus(for: .readWrite))
         if active {
+            if !startedForegroundSession {
+                startedForegroundSession = true
+                let start = Date.now
+                sessionStart = start
+                UserDefaults.standard.set(start, forKey: Self.sessionStartKey)
+                runningScan?.cancel()
+            }
             resetRetry()
             if history == nil { reloadReceiver() }
             libraryChanged()
@@ -196,15 +294,18 @@ final class PhotoSync: ObservableObject {
 
     @discardableResult
     func scan(manual: Bool = false, background: Bool = false) async -> Bool {
+        guard !Task.isCancelled else { return false }
         updatePhotoAccess(PHPhotoLibrary.authorizationStatus(for: .readWrite))
-        guard let receiver, receiver.automatic || manual, canReadPhotos, var history else { return true }
-        guard !working else {
+        guard let receiver, receiver.automatic || manual, canReadPhotos,
+              let history, let sessionStart else { return true }
+        guard runningScan == nil else {
             if !background { scanAgain = true }
             return true
         }
         working = true
         errorMessage = nil
         defer {
+            runningScan = nil
             working = false
             if scanAgain {
                 scanAgain = false
@@ -212,23 +313,34 @@ final class PhotoSync: ObservableObject {
             }
         }
 
+        let operation = Task {
+            await runScan(receiver: receiver, initialHistory: history, sessionStart: sessionStart, background: background)
+        }
+        runningScan = operation
+        return await withTaskCancellationHandler {
+            await operation.value
+        } onCancel: {
+            operation.cancel()
+        }
+    }
+
+    private func runScan(receiver: Receiver, initialHistory: SyncHistory, sessionStart: Date, background: Bool) async -> Bool {
+        guard !Task.isCancelled else { return false }
+        var history = initialHistory
         let screenshotPredicate = NSPredicate(
             format: "(mediaSubtypes & %d) != 0", Int(PHAssetMediaSubtype.photoScreenshot.rawValue)
         )
         let options = PHFetchOptions()
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        if let startDate = receiver.startDate {
-            options.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
-                screenshotPredicate, NSPredicate(format: "creationDate >= %@", startDate as NSDate),
-            ])
-        } else {
-            options.predicate = screenshotPredicate
-        }
+        options.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            screenshotPredicate, NSPredicate(format: "creationDate >= %@", sessionStart as NSDate),
+        ])
         let assets = PHAsset.fetchAssets(with: .image, options: options)
 
         var attempts = 0
         let deadline = ContinuousClock.now + .seconds(12)
         for index in 0..<assets.count {
+            if index.isMultiple(of: 64) { await Task.yield() }
             if Task.isCancelled { return false }
             if background && (attempts >= 5 || ContinuousClock.now >= deadline) { break }
             let asset = assets.object(at: index)
