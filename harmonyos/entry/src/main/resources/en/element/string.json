@@ -1,0 +1,6 @@
+{
+  "string": [
+    { "name": "module_description", "value": "Sync phone screenshots to your Mac over the local network" },
+    { "name": "gallery_permission_reason", "value": "Access your screenshot album to sync screenshots to your paired Mac" }
+  ]
+}

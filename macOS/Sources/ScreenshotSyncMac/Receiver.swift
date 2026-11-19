@@ -79,6 +79,7 @@ private final class UploadConnection: @unchecked Sendable {
     private struct Stage {
         let file: StagedFile?
         let name: Inbox.FileName
+        let device: ScreenshotDevice?
         var remaining: Int
     }
 
@@ -190,6 +191,9 @@ private final class UploadConnection: @unchecked Sendable {
             return
         }
         let name = Inbox.FileName(uploadID: id)
+        let device = name.source.flatMap { source in
+            request.headers["x-device-id"].flatMap { ScreenshotDevice(source: source, installationID: $0) }
+        }
         var file: StagedFile?
         if !Inbox.contains(name, in: folder) {
             let url = folder.appendingPathComponent(".screenshotsync-incoming-\(UUID().uuidString)")
@@ -202,7 +206,7 @@ private final class UploadConnection: @unchecked Sendable {
                 return
             }
         }
-        stage = Stage(file: file, name: name, remaining: size)
+        stage = Stage(file: file, name: name, device: device, remaining: size)
 
         if expectation == "100-continue" {
             connection.send(content: Data("HTTP/1.1 100 Continue\r\n\r\n".utf8),
@@ -229,7 +233,7 @@ private final class UploadConnection: @unchecked Sendable {
                 return
             }
             try file.handle.close()
-            let created = try Inbox.save(staged: file.url, name: stage.name, in: folder)
+            let created = try Inbox.save(staged: file.url, name: stage.name, device: stage.device, in: folder)
             if created { onReceive() }
             respond(created ? 201 : 200, created ? "saved" : "duplicate", key: "status")
         } catch Inbox.SaveError.invalidImage {

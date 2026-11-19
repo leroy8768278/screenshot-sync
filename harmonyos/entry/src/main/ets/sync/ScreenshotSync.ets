@@ -1,6 +1,7 @@
 import { abilityAccessCtrl, common, Permissions } from '@kit.AbilityKit';
 import { dataSharePredicates } from '@kit.ArkData';
 import { fileIo } from '@kit.CoreFileKit';
+import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { loadPairing, Pairing } from './Pairing';
 import { ImageFormat, imageFormat, MAX_IMAGE_BYTES } from './Protocol';
@@ -40,8 +41,8 @@ export function galleryAllowed(context: common.Context): boolean {
 
 export function isCurrentSync(context: common.Context, pairing: Pairing): boolean {
   const current: Pairing | undefined = loadPairing(context);
-  return pairing.sessionStartedMs !== undefined && current?.enabled === true &&
-    current.sessionStartedMs === pairing.sessionStartedMs && current.revision === pairing.revision &&
+  return pairing.pairedAfterMs !== undefined && current?.enabled === true &&
+    current.pairedAfterMs === pairing.pairedAfterMs && current.revision === pairing.revision &&
     current.destination === pairing.destination && current.host === pairing.host;
 }
 
@@ -51,7 +52,7 @@ export async function syncScreenshots(
   cancellation: SyncCancellation
 ): Promise<SyncResult> {
   const result = new SyncResult();
-  const startedMs: number | undefined = pairing.sessionStartedMs;
+  const startedMs: number | undefined = pairing.pairedAfterMs;
   if (startedMs === undefined || cancellation.stopped || !isCurrentSync(context, pairing)) {
     return result;
   }
@@ -59,7 +60,6 @@ export async function syncScreenshots(
     throw new Error('请授权读取相册，以便查找系统截图');
   }
 
-  const receiptFolder: string = context.getApplicationContext().filesDir;
   const helper: photoAccessHelper.PhotoAccessHelper = photoAccessHelper.getPhotoAccessHelper(context);
   const albumPredicates = new dataSharePredicates.DataSharePredicates();
   albumPredicates.equalTo(photoAccessHelper.AlbumKeys.ALBUM_LPATH, SCREENSHOTS_ALBUM);
@@ -84,10 +84,10 @@ export async function syncScreenshots(
   const photoPredicates = new dataSharePredicates.DataSharePredicates();
   photoPredicates.equalTo(photoAccessHelper.PhotoKeys.PHOTO_TYPE, photoAccessHelper.PhotoType.IMAGE);
   photoPredicates.notEqualTo(photoAccessHelper.PhotoKeys.POSITION, photoAccessHelper.PositionType.CLOUD);
-  photoPredicates.greaterThanOrEqualTo(photoAccessHelper.PhotoKeys.DATE_ADDED, Math.floor(startedMs / 1000));
-  photoPredicates.orderByAsc(photoAccessHelper.PhotoKeys.DATE_ADDED);
+  photoPredicates.greaterThanOrEqualTo(photoAccessHelper.PhotoKeys.DATE_TAKEN, Math.floor(startedMs / 1000));
+  photoPredicates.orderByAsc(photoAccessHelper.PhotoKeys.DATE_TAKEN);
   const assets: photoAccessHelper.FetchResult<photoAccessHelper.PhotoAsset> = await album.getAssets({
-    fetchColumns: [photoAccessHelper.PhotoKeys.DATE_ADDED, photoAccessHelper.PhotoKeys.DATE_ADDED_MS],
+    fetchColumns: [photoAccessHelper.PhotoKeys.DATE_TAKEN_MS, photoAccessHelper.PhotoKeys.DATE_ADDED_MS],
     predicates: photoPredicates
   });
 
@@ -99,7 +99,7 @@ export async function syncScreenshots(
       if (cancellation.stopped) {
         break;
       }
-      const date = asset.get(photoAccessHelper.PhotoKeys.DATE_ADDED_MS);
+      const date = asset.get(photoAccessHelper.PhotoKeys.DATE_TAKEN_MS);
       if (typeof date !== 'number' || !Number.isSafeInteger(date) || date <= 0) {
         result.skipped++;
         continue;
@@ -108,22 +108,22 @@ export async function syncScreenshots(
         continue;
       }
 
-      const idMatch: RegExpMatchArray | null = asset.uri.match(/^file:\/\/media\/Photo\/(\d+)(?:\/|$)/);
       const format: ImageFormat | undefined = imageFormat(asset.displayName);
-      if (!idMatch || !format) {
+      if (!format) {
         result.skipped++;
         continue;
       }
 
-      const id: string = `harmony-${pairing.installation}-${idMatch[1]}-${date}`;
-      const receipt: string = `${receiptFolder}/sent-${pairing.destination}-${id}`;
-      if (fileIo.accessSync(receipt)) {
+      const receipt: string | undefined = assetReceipt(context, pairing, asset.uri,
+        asset.get(photoAccessHelper.PhotoKeys.DATE_ADDED_MS));
+      if (receipt && fileIo.accessSync(receipt)) {
         continue;
       }
 
       let image: ArrayBuffer;
       try {
-        image = await readImage(asset.uri, cancellation);
+        const file: fileIo.File = await fileIo.open(asset.uri, fileIo.OpenMode.READ_ONLY);
+        image = await readImage(file, cancellation);
       } catch (_error) {
         if (cancellation.stopped) {
           break;
@@ -139,12 +139,17 @@ export async function syncScreenshots(
         receiver = new Receiver(pairing.host, pairing.token);
         cancellation.attach(receiver);
       }
-      const filename: string = `Screenshot-${date}-${idMatch[1]}.${format.extension}`;
-      if (await receiver.upload(id, filename, format, image)) {
-        // A retry after a crash may send the same ID. The Mac commits each ID only once.
-        const marker: fileIo.File = fileIo.openSync(receipt, fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY);
-        fileIo.closeSync(marker);
-        result.uploaded++;
+      const alreadySent = await uploadImage(context, pairing, receiver, format, image,
+        (): boolean => !cancellation.stopped && isCurrentSync(context, pairing));
+      if (alreadySent !== undefined) {
+        if (receipt) {
+          markReceipt(receipt);
+        }
+        if (!alreadySent) {
+          result.uploaded++;
+        }
+      } else if (cancellation.stopped || !isCurrentSync(context, pairing)) {
+        break;
       } else {
         result.skipped++;
       }
@@ -156,12 +161,53 @@ export async function syncScreenshots(
   }
 }
 
-async function readImage(uri: string, cancellation: SyncCancellation): Promise<ArrayBuffer> {
-  const file: fileIo.File = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
+export function assetReceipt(context: common.Context, pairing: Pairing, uri: string, added: string | number | boolean):
+  string | undefined {
+  const id: RegExpMatchArray | null = uri.match(/^file:\/\/media\/Photo\/(\d+)(?:\/|$)/);
+  if (id && typeof added === 'number' && Number.isSafeInteger(added) && added > 0) {
+    const directory: string = context.getApplicationContext().filesDir;
+    // Preserve previously sent gallery receipts and avoid rereading the file on each scan.
+    return `${directory}/sent-${pairing.destination}-harmony-${pairing.installation}-${id[1]}-${added}`;
+  }
+  return undefined;
+}
+
+function markReceipt(path: string): void {
+  const marker: fileIo.File = fileIo.openSync(path, fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY);
+  fileIo.closeSync(marker);
+}
+
+/** Returns true for a prior delivery, false for a new delivery, and undefined on cancellation or rejection. */
+export async function uploadImage(
+  context: common.Context, pairing: Pairing, receiver: Receiver, format: ImageFormat, data: ArrayBuffer,
+  current: () => boolean
+): Promise<boolean | undefined> {
+  const hash: cryptoFramework.Md = cryptoFramework.createMd('SHA256');
+  await hash.update({ data: new Uint8Array(data) });
+  const digest: cryptoFramework.DataBlob = await hash.digest();
+  const hex: string = Array.from(digest.data, (byte: number): string => byte.toString(16).padStart(2, '0')).join('');
+  const id: string = `harmony-${pairing.installation}-image-${hex}`;
+  const receipt: string = `${context.getApplicationContext().filesDir}/sent-${pairing.destination}-${id}`;
+  if (fileIo.accessSync(receipt)) {
+    return true;
+  }
+  if (!current()) {
+    return undefined;
+  }
+  // Content-derived IDs deduplicate when the same image is sent by both gallery and picker paths.
+  const filename: string = `Image-${hex.slice(0, 12)}.${format.extension}`;
+  if (!(await receiver.upload(id, pairing.installation, filename, format, data))) {
+    return undefined;
+  }
+  markReceipt(receipt);
+  return false;
+}
+
+export async function readImage(file: fileIo.File, cancellation: SyncCancellation): Promise<ArrayBuffer> {
   try {
     const stat: fileIo.Stat = await fileIo.stat(file.fd);
     if (stat.size <= 0 || stat.size > MAX_IMAGE_BYTES) {
-      throw new Error('截图为空或大于 64 MiB');
+      throw new Error('图片为空或大于 64 MiB');
     }
     const data = new ArrayBuffer(stat.size);
     const bytes = new Uint8Array(data);
@@ -174,7 +220,7 @@ async function readImage(uri: string, cancellation: SyncCancellation): Promise<A
       const length: number = Math.min(chunk.byteLength, stat.size - offset);
       const read: number = await fileIo.read(file.fd, chunk, { offset: offset, length: length });
       if (read <= 0) {
-        throw new Error('截图仍在写入，稍后重试');
+        throw new Error('图片尚未保存完整，稍后重试');
       }
       bytes.set(new Uint8Array(chunk, 0, read), offset);
       offset += read;

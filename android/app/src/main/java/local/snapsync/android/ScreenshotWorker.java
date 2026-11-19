@@ -31,11 +31,9 @@ public final class ScreenshotWorker extends Worker {
     public Result doWork() {
         Context context = getApplicationContext();
         SyncSettings.Pairing pairing = SyncSettings.read(context);
-        boolean manual = getInputData().getBoolean(SyncScheduler.MANUAL, false);
-        // Jobs already scheduled by the previous version have no generation.
         String generation = getInputData().getString(SyncScheduler.GENERATION);
-        if (!pairing.canSync(manual) || (generation != null && !generation.equals(pairing.generation()))
-            || PhotoAccess.current(context) == PhotoAccess.NONE) {
+        if (!pairing.canSync() || !pairing.generation().equals(generation)
+            || getInputData().getBoolean("manual", false) || PhotoAccess.current(context) != PhotoAccess.FULL) {
             return Result.success();
         }
         if (!SYNC_LOCK.tryLock()) {
@@ -105,14 +103,17 @@ public final class ScreenshotWorker extends Worker {
 
                 int response;
                 try {
-                    response = receiver.upload(resolver, screenshot, readCancellation,
+                    response = ImageTransfer.send(context, pairing, receiver, receipts, screenshot.uri(),
+                        screenshot.id(), screenshot.filename(), screenshot.type(), readCancellation,
                         () -> cancelled(context, pairing));
                 } catch (FileNotFoundException missing) {
                     // A screenshot deleted while a scan was in progress is no longer eligible.
                     continue;
                 }
+                if (response == ImageTransfer.ALREADY_SENT) {
+                    continue;
+                }
                 if (response == 200 || response == 201) {
-                    receipts.remember(receiverId, screenshot.id());
                     uploaded++;
                 } else if (response == 413 || response == 415 || response == 422) {
                     skipped++;

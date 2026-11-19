@@ -9,6 +9,7 @@
 		202600000000000000000002 /* Receiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202600000000000000000012 /* Receiver.swift */; };
 		202600000000000000000003 /* PhotoSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202600000000000000000013 /* PhotoSync.swift */; };
 		202600000000000000000004 /* BGRefresh.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202600000000000000000014 /* BGRefresh.swift */; };
+		202600000000000000000005 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 202600000000000000000034 /* InfoPlist.strings */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -18,6 +19,8 @@
 		202600000000000000000014 /* BGRefresh.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BGRefresh.swift; sourceTree = "<group>"; };
 		202600000000000000000015 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		202600000000000000000016 /* ShotSync.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ShotSync.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		202600000000000000000017 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
+		202600000000000000000018 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -41,6 +44,7 @@
 				202600000000000000000013 /* PhotoSync.swift */,
 				202600000000000000000014 /* BGRefresh.swift */,
 				202600000000000000000015 /* Info.plist */,
+				202600000000000000000034 /* InfoPlist.strings */,
 			);
 			path = ShotSync;
 			sourceTree = "<group>";
@@ -60,6 +64,7 @@
 			buildPhases = (
 				202600000000000000000051 /* Sources */,
 				202600000000000000000021 /* Frameworks */,
+				202600000000000000000022 /* Resources */,
 			);
 			buildRules = ();
 			dependencies = ();
@@ -80,9 +85,9 @@
 			};
 			buildConfigurationList = 202600000000000000000072 /* Build configuration list for PBXProject "ShotSync" */;
 			compatibilityVersion = "Xcode 14.0";
-			developmentRegion = zh_CN;
+			developmentRegion = "zh-Hans";
 			hasScannedForEncodings = 0;
-			knownRegions = (zh_CN, Base);
+			knownRegions = ("zh-Hans", en, Base);
 			mainGroup = 202600000000000000000031;
 			productRefGroup = 202600000000000000000033 /* Products */;
 			projectDirPath = "";
@@ -90,6 +95,17 @@
 			targets = (202600000000000000000041 /* ShotSync */);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		202600000000000000000022 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				202600000000000000000005 /* InfoPlist.strings in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		202600000000000000000051 /* Sources */ = {
@@ -104,6 +120,18 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXVariantGroup section */
+		202600000000000000000034 /* InfoPlist.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				202600000000000000000017 /* zh-Hans */,
+				202600000000000000000018 /* en */,
+			);
+			name = InfoPlist.strings;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
 
 /* Begin XCBuildConfiguration section */
 		202600000000000000000061 /* Debug */ = {

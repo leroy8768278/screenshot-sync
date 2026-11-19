@@ -48,5 +48,14 @@ export function imageFormat(displayName: string): ImageFormat | undefined {
   if (name.endsWith('.webp')) {
     return new ImageFormat('webp', 'image/webp');
   }
+  if (name.endsWith('.gif')) {
+    return new ImageFormat('gif', 'image/gif');
+  }
+  if (name.endsWith('.tiff') || name.endsWith('.tif')) {
+    return new ImageFormat('tiff', 'image/tiff');
+  }
+  if (name.endsWith('.bmp')) {
+    return new ImageFormat('bmp', 'image/bmp');
+  }
   return undefined;
 }

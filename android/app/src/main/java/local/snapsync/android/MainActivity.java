@@ -1,20 +1,26 @@
 package local.snapsync.android;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.ActivityNotFoundException;
+import android.content.ClipData;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
 import android.database.ContentObserver;
 import android.graphics.Color;
 import android.graphics.Insets;
+import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.CancellationSignal;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.MediaStore;
 import android.provider.Settings;
 import android.text.InputType;
 import android.text.method.PasswordTransformationMethod;
@@ -22,19 +28,21 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.inputmethod.InputMethodManager;
+import android.util.Size;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
-import android.widget.Switch;
 import android.widget.TextView;
 
-import androidx.lifecycle.LiveData;
-import androidx.lifecycle.Observer;
-import androidx.work.WorkInfo;
-
 import java.io.IOException;
+import java.text.DateFormat;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
@@ -42,19 +50,21 @@ import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
     private static final int REQUEST_PHOTOS = 1;
-    private static final int BACKGROUND = 0xfff2f5f1;
-    private static final int INK = 0xff182b24;
-    private static final int MUTED = 0xff54645b;
-    private static final int ACCENT = 0xff24604f;
-    private static final int BORDER = 0xffdbe5dd;
-    private static final int FIELD = 0xfff7faf8;
+    private static final int PICK_IMAGES = 2;
+    private static final int BACKGROUND = 0xfff3f6fb;
+    private static final int INK = 0xff172641;
+    private static final int MUTED = 0xff52617a;
+    private static final int ACCENT = 0xff2457c6;
+    private static final int BORDER = 0xffd8e0ed;
+    private static final int FIELD = 0xfff8faff;
     private static final int ERROR = 0xffa3262e;
     private static final int HOST_ID = View.generateViewId();
     private static final int CODE_ID = View.generateViewId();
-    private static final int AUTO_ID = View.generateViewId();
 
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private final ExecutorService testExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService connectionExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService manualExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService previewExecutor = Executors.newSingleThreadExecutor();
     private final Runnable scanOnChange = () -> triggerForegroundSync();
     private final ContentObserver photos = new ContentObserver(handler) {
         @Override
@@ -71,29 +81,36 @@ public final class MainActivity extends Activity {
 
     private EditText hostInput;
     private EditText codeInput;
-    private Switch automaticInput;
+    private LinearLayout pairingPanel;
+    private LinearLayout syncPanel;
+    private TextView connectedReceiver;
+    private TextView syncMode;
     private TextView testStatus;
     private TextView syncStatus;
     private TextView permissionStatus;
-    private Button testButton;
+    private Button connectButton;
+    private Button connectionSettings;
+    private Button disconnectButton;
     private Button requestPermissionButton;
     private Button openSettingsButton;
-    private Button syncButton;
+    private Button chooseImagesButton;
+    private Button retryButton;
+    private Button cancelSendButton;
     private Button syncControlButton;
+    private TextView manualStatus;
     private boolean observerRegistered;
-    private boolean manualSyncPending;
-    private LiveData<List<WorkInfo>> manualWork;
-    private final Observer<List<WorkInfo>> manualWorkObserver = work -> {
-        manualSyncPending = work.stream().anyMatch(info -> !info.getState().isFinished());
-        refreshSyncControls();
-    };
+    private boolean verifying;
+    private boolean editingConnection;
+    private boolean migrationAttempted;
+    private String pickerSession = "";
+    private String selectedSession = "";
+    private ArrayList<Uri> selectedImages = new ArrayList<>();
+    private ManualSend manual;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        if (SyncSettings.startLaunch(this)) {
-            SyncScheduler.cancelAll(this);
-        }
+        SyncScheduler.cancelLegacyScan(this);
         if (Build.VERSION.SDK_INT >= 30) {
             getWindow().setDecorFitsSystemWindows(false);
         }
@@ -104,17 +121,32 @@ public final class MainActivity extends Activity {
             showReceiverAddress(pairing.host());
             codeInput.setText(pairing.code());
         }
-        automaticInput.setChecked(pairing.automatic());
+        if (savedInstanceState != null) {
+            pickerSession = savedInstanceState.getString("picker_session", "");
+            selectedSession = savedInstanceState.getString("selected_session", "");
+            ArrayList<Uri> restored = Build.VERSION.SDK_INT >= 33
+                ? savedInstanceState.getParcelableArrayList("selected_images", Uri.class)
+                : savedInstanceState.getParcelableArrayList("selected_images");
+            if (restored != null && pairing.isVerified() && selectedSession.equals(sessionKey(pairing))) {
+                selectedImages = restored;
+            }
+        }
         SyncScheduler.configure(this, pairing);
         showSavedStatus();
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle state) {
+        super.onSaveInstanceState(state);
+        state.putString("picker_session", pickerSession);
+        state.putString("selected_session", selectedSession);
+        state.putParcelableArrayList("selected_images", selectedImages);
     }
 
     @Override
     protected void onStart() {
         super.onStart();
         SyncSettings.preferences(this).registerOnSharedPreferenceChangeListener(statusListener);
-        manualWork = SyncScheduler.manualWork(this);
-        manualWork.observeForever(manualWorkObserver);
         showSavedStatus();
     }
 
@@ -122,6 +154,12 @@ public final class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         refreshPermissions();
+        SyncSettings.Pairing pairing = SyncSettings.read(this);
+        SyncScheduler.configure(this, pairing);
+        if (pairing.isConfigured() && !pairing.isVerified() && !migrationAttempted) {
+            migrationAttempted = true;
+            verifyConnection(new Input(pairing.host(), pairing.code()));
+        }
         triggerForegroundSync();
     }
 
@@ -135,13 +173,17 @@ public final class MainActivity extends Activity {
     @Override
     protected void onStop() {
         SyncSettings.preferences(this).unregisterOnSharedPreferenceChangeListener(statusListener);
-        manualWork.removeObserver(manualWorkObserver);
         super.onStop();
     }
 
     @Override
     protected void onDestroy() {
-        testExecutor.shutdownNow();
+        if (manual != null) {
+            manual.close();
+        }
+        connectionExecutor.shutdownNow();
+        manualExecutor.shutdownNow();
+        previewExecutor.shutdownNow();
         super.onDestroy();
     }
 
@@ -150,6 +192,7 @@ public final class MainActivity extends Activity {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQUEST_PHOTOS) {
             refreshPermissions();
+            SyncScheduler.configure(this, SyncSettings.read(this));
             triggerForegroundSync();
         }
     }
@@ -187,14 +230,16 @@ public final class MainActivity extends Activity {
         title.setAccessibilityHeading(true);
         add(page, title, 0);
         add(page, label(R.string.subtitle, 14, MUTED, false), 6);
-        add(page, statusCard(), 22);
-        add(page, pairingCard(), 12);
-        add(page, label(R.string.background_hint, 12, MUTED, false), 14);
+        pairingPanel = pairingCard();
+        syncPanel = statusCard();
+        add(page, syncPanel, 20);
+        add(page, pairingPanel, 12);
         return scroll;
     }
 
-    private View pairingCard() {
-        LinearLayout card = card(R.string.receiver);
+    private LinearLayout pairingCard() {
+        LinearLayout card = card(R.string.connect_title);
+        add(card, label(R.string.connect_help, 13, MUTED, false), 8);
         TextView addressLabel = label(R.string.host, 13, INK, true);
         addressLabel.setLabelFor(HOST_ID);
         add(card, addressLabel, 16);
@@ -222,26 +267,47 @@ public final class MainActivity extends Activity {
         codeRow.addView(visibility, visibilityParams);
         add(card, codeRow, 6);
 
-        automaticInput = toggle(AUTO_ID, R.string.automatic);
-        add(card, automaticInput, 12);
-
-        testButton = button(R.string.test, false);
-        testButton.setOnClickListener(view -> testConnection());
-        Button save = button(R.string.save, true);
-        save.setOnClickListener(view -> savePairing());
-        add(card, actionRow(testButton, save), 12);
+        connectButton = button(R.string.connect_title, true);
+        connectButton.setOnClickListener(view -> {
+            Input input = readInput();
+            if (input != null) {
+                verifyConnection(input);
+            }
+        });
+        add(card, connectButton, 12);
         testStatus = label(0, 13, MUTED, false);
         testStatus.setVisibility(View.GONE);
         testStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         add(card, testStatus, 10);
+        disconnectButton = button(R.string.disconnect, false);
+        disconnectButton.setOnClickListener(view -> confirmDisconnect());
+        add(card, disconnectButton, 10);
         return card;
     }
 
-    private View statusCard() {
-        LinearLayout card = card(R.string.status_title);
-        syncStatus = label(R.string.status_setup, 14, INK, false);
+    private LinearLayout statusCard() {
+        LinearLayout page = column();
+        LinearLayout destination = card(R.string.receiver);
+        connectedReceiver = label(0, 14, INK, false);
+        add(destination, connectedReceiver, 7);
+        connectionSettings = button(R.string.connection_settings, false);
+        connectionSettings.setOnClickListener(view -> {
+            editingConnection = !editingConnection;
+            refreshSyncControls();
+            if (editingConnection) {
+                pairingPanel.post(() -> pairingPanel.requestRectangleOnScreen(
+                    new Rect(0, 0, pairingPanel.getWidth(), dp(128)), false));
+            }
+        });
+        add(destination, connectionSettings, 10);
+        add(page, destination, 0);
+
+        LinearLayout card = card(R.string.automatic);
+        syncMode = label(0, 14, INK, true);
+        add(card, syncMode, 9);
+        syncStatus = label(R.string.status_setup, 13, MUTED, false);
         syncStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-        add(card, syncStatus, 12);
+        add(card, syncStatus, 5);
         permissionStatus = label(R.string.permission_missing, 13, MUTED, false);
         add(card, permissionStatus, 8);
         requestPermissionButton = button(R.string.permission, false);
@@ -251,12 +317,32 @@ public final class MainActivity extends Activity {
             Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", getPackageName(), null))));
         add(card, actionRow(requestPermissionButton, openSettingsButton), 8);
 
-        syncButton = button(R.string.sync, true);
-        syncButton.setOnClickListener(view -> syncNow());
         syncControlButton = button(R.string.stop_sync, false);
         syncControlButton.setOnClickListener(view -> toggleSyncPause());
-        add(card, actionRow(syncButton, syncControlButton), 12);
-        return card;
+        add(card, syncControlButton, 10);
+        add(page, card, 12);
+
+        chooseImagesButton = button(R.string.pick_images, true);
+        chooseImagesButton.setOnClickListener(view -> openImagePicker());
+        add(page, chooseImagesButton, 12);
+        manualStatus = label(0, 13, MUTED, false);
+        manualStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        manualStatus.setVisibility(View.GONE);
+        add(page, manualStatus, 8);
+        retryButton = button(R.string.manual_retry, false);
+        retryButton.setOnClickListener(view -> confirmImages());
+        add(page, retryButton, 8);
+        cancelSendButton = button(R.string.manual_cancel, false);
+        cancelSendButton.setOnClickListener(view -> {
+            if (manual != null) {
+                manual.close();
+                cancelSendButton.setEnabled(false);
+                showManualStatus(getString(R.string.manual_cancelling));
+            }
+        });
+        add(page, cancelSendButton, 8);
+        add(page, label(R.string.background_hint, 12, MUTED, false), 14);
+        return page;
     }
 
     private record Input(String host, String code) {}
@@ -277,78 +363,82 @@ public final class MainActivity extends Activity {
         return new Input(host, code);
     }
 
-    private void savePairing() {
-        Input input = readInput();
-        if (input == null) {
+    private void verifyConnection(Input input) {
+        if (verifying) {
             return;
         }
-        if (!SyncSettings.save(this, input.host(), input.code(), automaticInput.isChecked())) {
-            showTestResult(R.string.save_failed, true);
-            return;
-        }
-        showReceiverAddress(input.host());
-        codeInput.setText(input.code());
-        InputMethodManager keyboard = getSystemService(InputMethodManager.class);
-        keyboard.hideSoftInputFromWindow(hostInput.getWindowToken(), 0);
-        hostInput.clearFocus();
-        codeInput.clearFocus();
-
-        SyncSettings.Pairing pairing = SyncSettings.read(this);
-        SyncScheduler.configure(this, pairing);
-        refreshPermissions();
-        if (pairing.canSync(false) && PhotoAccess.current(this) != PhotoAccess.NONE) {
-            SyncSettings.status(this, pairing, R.string.status_queued);
-            SyncScheduler.sync(this, pairing, false);
-        }
-    }
-
-    private void testConnection() {
-        Input input = readInput();
-        if (input == null) {
-            return;
-        }
-        testButton.setEnabled(false);
+        verifying = true;
+        refreshSyncControls();
         showTestResult(R.string.status_testing, false);
-        testExecutor.execute(() -> {
-            int result;
-            try {
-                result = new ReceiverConnection(getApplicationContext(), input.host(), input.code()).test();
+        connectionExecutor.execute(() -> {
+            int response;
+            try (ReceiverConnection receiver = new ReceiverConnection(getApplicationContext(), input.host(), input.code())) {
+                response = receiver.test();
             } catch (IOException failure) {
-                result = 0;
+                response = 0;
             }
-            final int response = result;
+            int result = response;
+            long verifiedAt = System.currentTimeMillis();
             runOnUiThread(() -> {
                 if (isDestroyed()) {
                     return;
                 }
-                testButton.setEnabled(true);
-                switch (response) {
-                    case 200 -> showTestResult(R.string.status_connected, false);
+                verifying = false;
+                switch (result) {
+                    case 200 -> saveVerified(input, verifiedAt);
                     case 401, 403 -> showTestResult(R.string.status_bad_code, true);
                     case 0 -> showTestResult(R.string.status_network, true);
-                    default -> showTestResult(R.string.status_rejected, true, response);
+                    default -> showTestResult(R.string.status_rejected, true, result);
                 }
+                refreshSyncControls();
             });
         });
     }
 
-    private void syncNow() {
+    private void saveVerified(Input input, long verifiedAt) {
+        if (!SyncSettings.saveVerified(this, input.host(), input.code(), verifiedAt)) {
+            showTestResult(R.string.save_failed, true);
+            return;
+        }
         SyncSettings.Pairing pairing = SyncSettings.read(this);
-        if (!pairing.isConfigured()) {
-            syncStatus.setText(R.string.status_save_first);
-            return;
+        if (!selectedSession.equals(sessionKey(pairing))) {
+            clearSelection();
+            manualStatus.setVisibility(View.GONE);
         }
-        if (pairing.paused()) {
-            return;
-        }
-        if (PhotoAccess.current(this) == PhotoAccess.NONE) {
-            syncStatus.setText(R.string.permission_missing);
-            return;
-        }
-        SyncSettings.status(this, pairing, R.string.status_queued);
-        SyncScheduler.sync(this, pairing, true);
-        manualSyncPending = true;
-        refreshSyncControls();
+
+        showReceiverAddress(input.host());
+        codeInput.setText(input.code());
+        getSystemService(InputMethodManager.class).hideSoftInputFromWindow(hostInput.getWindowToken(), 0);
+        hostInput.clearFocus();
+        codeInput.clearFocus();
+        editingConnection = false;
+        testStatus.setVisibility(View.GONE);
+        SyncScheduler.configure(this, pairing);
+        refreshPermissions();
+        triggerForegroundSync();
+    }
+
+    private void confirmDisconnect() {
+        new AlertDialog.Builder(this)
+            .setTitle(R.string.disconnect)
+            .setMessage(R.string.disconnect_explanation)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(R.string.disconnect, (dialog, which) -> {
+                if (!SyncSettings.disconnect(this)) {
+                    showTestResult(R.string.save_failed, true);
+                    return;
+                }
+                clearSelection();
+                editingConnection = false;
+                manualStatus.setVisibility(View.GONE);
+                testStatus.setVisibility(View.GONE);
+                hostInput.setText("");
+                codeInput.setText("");
+                SyncScheduler.configure(this, SyncSettings.read(this));
+                showSavedStatus();
+                refreshPermissions();
+            })
+            .show();
     }
 
     private void toggleSyncPause() {
@@ -359,47 +449,214 @@ public final class MainActivity extends Activity {
             return;
         }
         handler.removeCallbacks(scanOnChange);
-        SyncSettings.Pairing current = SyncSettings.read(this);
-        SyncScheduler.configure(this, current);
+        SyncScheduler.configure(this, SyncSettings.read(this));
         refreshPermissions();
-        if (!pause && PhotoAccess.current(this) != PhotoAccess.NONE) {
-            if (current.automatic()) {
-                SyncSettings.status(this, current, R.string.status_queued);
-                triggerForegroundSync();
-            } else {
-                syncNow();
-            }
+        if (!pause) {
+            triggerForegroundSync();
         }
     }
 
     private void triggerForegroundSync() {
-        SyncSettings.Pairing pairing = SyncSettings.read(this);
-        if (pairing.canSync(false) && PhotoAccess.current(this) != PhotoAccess.NONE) {
-            SyncScheduler.sync(this, pairing, false);
-        }
+        SyncScheduler.sync(this, SyncSettings.read(this));
     }
 
     private void refreshPermissions() {
         PhotoAccess access = PhotoAccess.current(this);
-        permissionStatus.setText(switch (access) {
-            case FULL -> R.string.permission_full;
-            case LIMITED -> R.string.permission_partial;
-            case NONE -> R.string.permission_missing;
-        });
+        permissionStatus.setText(access == PhotoAccess.LIMITED
+            ? R.string.permission_partial : R.string.permission_missing);
+        permissionStatus.setVisibility(access == PhotoAccess.FULL ? View.GONE : View.VISIBLE);
         requestPermissionButton.setText(access == PhotoAccess.LIMITED
             ? R.string.permission_button_partial : R.string.permission);
         requestPermissionButton.setVisibility(access == PhotoAccess.FULL ? View.GONE : View.VISIBLE);
         openSettingsButton.setVisibility(access == PhotoAccess.FULL ? View.GONE : View.VISIBLE);
         refreshSyncControls();
-        updateObserver(access != PhotoAccess.NONE && SyncSettings.read(this).canSync(false));
+        updateObserver(access == PhotoAccess.FULL && SyncSettings.read(this).canSync());
     }
 
     private void refreshSyncControls() {
         SyncSettings.Pairing pairing = SyncSettings.read(this);
-        syncButton.setEnabled(pairing.canSync(true) && PhotoAccess.current(this) != PhotoAccess.NONE);
+        boolean connected = pairing.isVerified();
+        boolean configured = pairing.isConfigured();
+        syncPanel.setVisibility(connected ? View.VISIBLE : View.GONE);
+        pairingPanel.setVisibility(connected && !editingConnection ? View.GONE : View.VISIBLE);
+        boolean sending = manual != null;
+        connectButton.setEnabled(!verifying && !sending);
+        disconnectButton.setVisibility(configured ? View.VISIBLE : View.GONE);
+        disconnectButton.setEnabled(!verifying && !sending);
+        connectionSettings.setEnabled(!sending && !verifying);
+        chooseImagesButton.setEnabled(connected && !sending && !verifying);
+        retryButton.setVisibility(!selectedImages.isEmpty() && !sending ? View.VISIBLE : View.GONE);
+        retryButton.setEnabled(connected && !verifying);
+        cancelSendButton.setVisibility(sending ? View.VISIBLE : View.GONE);
+        syncControlButton.setEnabled(!verifying);
         syncControlButton.setText(pairing.paused() ? R.string.resume_sync : R.string.stop_sync);
-        syncControlButton.setVisibility(pairing.isConfigured()
-            && (pairing.paused() || pairing.automatic() || manualSyncPending) ? View.VISIBLE : View.GONE);
+        if (!connected) {
+            return;
+        }
+
+        String timestamp = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
+            .format(new Date(pairing.connectedAt()));
+        connectedReceiver.setText(getString(R.string.connection_summary, pairing.host(), SyncSettings.PORT, timestamp));
+        syncMode.setText(pairing.paused() ? R.string.automatic_paused
+            : PhotoAccess.current(this) == PhotoAccess.FULL ? R.string.automatic_running : R.string.automatic_needs_permission);
+    }
+
+    @SuppressWarnings("deprecation")
+    private void openImagePicker() {
+        SyncSettings.Pairing pairing = SyncSettings.read(this);
+        if (!pairing.isVerified()) {
+            return;
+        }
+        pickerSession = sessionKey(pairing);
+        if (Build.VERSION.SDK_INT >= 33) {
+            Intent photoPicker = new Intent(MediaStore.ACTION_PICK_IMAGES)
+                .setType("image/*")
+                .putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, MediaStore.getPickImagesMaxLimit());
+            try {
+                startActivityForResult(photoPicker, PICK_IMAGES);
+                return;
+            } catch (ActivityNotFoundException unavailable) {
+                // Some devices provide the document picker only.
+            }
+        }
+        Intent documents = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("image/*")
+            .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        try {
+            startActivityForResult(documents, PICK_IMAGES);
+        } catch (ActivityNotFoundException unavailable) {
+            pickerSession = "";
+            showManualStatus(getString(R.string.manual_picker_missing));
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (request != PICK_IMAGES) {
+            return;
+        }
+        String session = pickerSession;
+        pickerSession = "";
+        SyncSettings.Pairing pairing = SyncSettings.read(this);
+        if (result != RESULT_OK || data == null || !pairing.isVerified() || !session.equals(sessionKey(pairing))) {
+            return;
+        }
+        LinkedHashSet<Uri> images = new LinkedHashSet<>();
+        addSelectedUri(images, data.getData());
+        ClipData clip = data.getClipData();
+        if (clip != null) {
+            for (int i = 0; i < clip.getItemCount(); i++) {
+                addSelectedUri(images, clip.getItemAt(i).getUri());
+            }
+        }
+        if (images.isEmpty()) {
+            return;
+        }
+        selectedSession = session;
+        selectedImages = new ArrayList<>(images);
+        confirmImages();
+    }
+
+    private static void addSelectedUri(LinkedHashSet<Uri> images, Uri uri) {
+        if (uri != null && "content".equals(uri.getScheme())) {
+            images.add(uri);
+        }
+    }
+
+    private void confirmImages() {
+        SyncSettings.Pairing pairing = SyncSettings.read(this);
+        if (selectedImages.isEmpty() || !pairing.isVerified() || !selectedSession.equals(sessionKey(pairing))) {
+            return;
+        }
+        List<Uri> selection = new ArrayList<>(selectedImages);
+        LinearLayout previewContent = column();
+        previewContent.setPadding(dp(20), dp(8), dp(20), dp(8));
+        TextView message = label(0, 14, INK, false);
+        message.setText(getString(R.string.manual_confirm_receiver, pairing.host(), SyncSettings.PORT, selection.size()));
+        add(previewContent, message, 0);
+        HorizontalScrollView thumbnails = new HorizontalScrollView(this);
+        LinearLayout images = row();
+        thumbnails.addView(images);
+        add(previewContent, thumbnails, 10);
+        CancellationSignal cancellation = new CancellationSignal();
+        for (Uri uri : selection.subList(0, Math.min(selection.size(), 6))) {
+            ImageView thumbnail = new ImageView(this);
+            thumbnail.setBackground(shape(FIELD, BORDER, 8));
+            thumbnail.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(62), dp(62));
+            params.setMarginEnd(dp(8));
+            images.addView(thumbnail, params);
+            previewExecutor.execute(() -> {
+                try {
+                    var bitmap = getContentResolver().loadThumbnail(uri, new Size(dp(62), dp(62)), cancellation);
+                    runOnUiThread(() -> thumbnail.setImageBitmap(bitmap));
+                } catch (IOException | RuntimeException unavailable) {
+                    // Some document providers cannot provide previews. The item remains selected.
+                }
+            });
+        }
+        AlertDialog dialog = new AlertDialog.Builder(this)
+            .setTitle(R.string.manual_confirm_title)
+            .setView(previewContent)
+            .setNegativeButton(android.R.string.cancel, (alert, which) -> {
+                clearSelection();
+                refreshSyncControls();
+            })
+            .setPositiveButton(getString(R.string.manual_send, selection.size()),
+                (alert, which) -> startSend(pairing, selection))
+            .create();
+        dialog.setOnCancelListener(alert -> {
+            clearSelection();
+            refreshSyncControls();
+        });
+        dialog.setOnDismissListener(alert -> cancellation.cancel());
+        dialog.show();
+    }
+
+    private void startSend(SyncSettings.Pairing pairing, List<Uri> selection) {
+        SyncSettings.Pairing current = SyncSettings.read(this);
+        if (manual != null || !pairing.sameSession(current) || !pairing.host().equals(current.host())) {
+            return;
+        }
+        ManualSend transfer = new ManualSend();
+        manual = transfer;
+        cancelSendButton.setEnabled(true);
+        showManualStatus(getString(R.string.manual_sending, selection.size()));
+        refreshSyncControls();
+        manualExecutor.execute(() -> {
+            ManualSend.Result result = transfer.send(getApplicationContext(), pairing, selection);
+            runOnUiThread(() -> finishSend(transfer, result));
+        });
+    }
+
+    private void finishSend(ManualSend transfer, ManualSend.Result result) {
+        if (isDestroyed() || manual != transfer) {
+            return;
+        }
+        manual = null;
+        selectedImages = new ArrayList<>(result.pending());
+        String summary = getString(R.string.manual_result, result.sent(), result.alreadySynced(), selectedImages.size());
+        if (result.error() != 0) {
+            summary += "\n" + getString(result.error(), result.response());
+        }
+        showManualStatus(summary);
+        refreshSyncControls();
+    }
+
+    private void showManualStatus(String message) {
+        manualStatus.setText(message);
+        manualStatus.setVisibility(View.VISIBLE);
+    }
+
+    private void clearSelection() {
+        selectedImages.clear();
+        selectedSession = "";
+    }
+
+    private static String sessionKey(SyncSettings.Pairing pairing) {
+        return pairing.receiverId() + ":" + pairing.connectedAt();
     }
 
     private void updateObserver(boolean observe) {
@@ -470,16 +727,6 @@ public final class MainActivity extends Activity {
         return view;
     }
 
-    private Switch toggle(int id, int text) {
-        Switch view = new Switch(this);
-        view.setId(id);
-        view.setText(text);
-        view.setTextSize(14);
-        view.setTextColor(INK);
-        view.setMinHeight(dp(46));
-        return view;
-    }
-
     private Button button(int text, boolean filled) {
         Button view = new Button(this);
         view.setText(text);
@@ -487,10 +734,10 @@ public final class MainActivity extends Activity {
         view.setTextSize(14);
         view.setTextColor(new ColorStateList(
             new int[][] {{-android.R.attr.state_enabled}, {}},
-            new int[] {filled ? 0xffd3e2da : MUTED, filled ? Color.WHITE : ACCENT}));
+            new int[] {filled ? 0xffd8e5ff : MUTED, filled ? Color.WHITE : ACCENT}));
         view.setMinHeight(dp(48));
         view.setPadding(dp(12), dp(6), dp(12), dp(6));
-        view.setBackground(new RippleDrawable(ColorStateList.valueOf(0x24315f48),
+        view.setBackground(new RippleDrawable(ColorStateList.valueOf(0x242457c6),
             shape(filled ? ACCENT : FIELD, filled ? ACCENT : BORDER, 9),
             shape(Color.WHITE, Color.WHITE, 9)));
         return view;

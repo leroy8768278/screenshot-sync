@@ -1,14 +1,10 @@
 package local.snapsync.android;
 
-import android.content.ContentResolver;
 import android.content.Context;
-import android.content.res.AssetFileDescriptor;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
-import android.os.CancellationSignal;
 
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -47,46 +43,30 @@ final class ReceiverConnection implements AutoCloseable {
         }
     }
 
-    int upload(ContentResolver resolver, ScreenshotCatalog.Screenshot screenshot,
-               CancellationSignal readCancellation, BooleanSupplier cancelled) throws IOException {
-        AssetFileDescriptor descriptor = resolver.openAssetFileDescriptor(screenshot.uri(), "r", readCancellation);
-        if (descriptor == null) {
-            throw new FileNotFoundException("Screenshot is no longer available");
-        }
-        try (descriptor) {
-            long length = descriptor.getLength();
-            if (length == AssetFileDescriptor.UNKNOWN_LENGTH) {
-                length = screenshot.size();
-            }
-            if (length <= 0) {
-                throw new IOException("Missing screenshot length");
-            }
-            if (length > MAX_BYTES) {
-                return 413;
-            }
-            checkCancelled(cancelled);
+    int upload(InputStream input, long length, String id, String deviceId, String filename,
+               String type, BooleanSupplier cancelled) throws IOException {
+        checkCancelled(cancelled);
 
-            HttpURLConnection connection = open("/v1/screenshots");
-            try {
-                connection.setRequestMethod("POST");
-                connection.setDoOutput(true);
-                connection.setFixedLengthStreamingMode(length);
-                connection.setRequestProperty("Content-Type", screenshot.type());
-                connection.setRequestProperty("X-Screenshot-ID", screenshot.id());
-                connection.setRequestProperty("X-Filename", screenshot.filename());
-                try (InputStream input = descriptor.createInputStream();
-                     OutputStream output = connection.getOutputStream()) {
-                    byte[] buffer = new byte[64 * 1024];
-                    int count;
-                    while ((count = input.read(buffer)) != -1) {
-                        checkCancelled(cancelled);
-                        output.write(buffer, 0, count);
-                    }
+        HttpURLConnection connection = open("/v1/screenshots");
+        try {
+            connection.setRequestMethod("POST");
+            connection.setDoOutput(true);
+            connection.setFixedLengthStreamingMode(length);
+            connection.setRequestProperty("Content-Type", type);
+            connection.setRequestProperty("X-Screenshot-ID", id);
+            connection.setRequestProperty("X-Device-ID", deviceId);
+            connection.setRequestProperty("X-Filename", filename);
+            try (OutputStream output = connection.getOutputStream()) {
+                byte[] buffer = new byte[64 * 1024];
+                int count;
+                while ((count = input.read(buffer)) != -1) {
+                    checkCancelled(cancelled);
+                    output.write(buffer, 0, count);
                 }
-                return connection.getResponseCode();
-            } finally {
-                release(connection);
             }
+            return connection.getResponseCode();
+        } finally {
+            release(connection);
         }
     }
 

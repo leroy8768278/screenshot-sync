@@ -32,9 +32,25 @@ final class DeliveryReceipts extends SQLiteOpenHelper {
     }
 
     void remember(String receiver, String screenshot) {
+        insert(getWritableDatabase(), receiver, screenshot);
+    }
+
+    void remember(String receiver, String screenshot, String content) {
+        SQLiteDatabase database = getWritableDatabase();
+        database.beginTransaction();
+        try {
+            insert(database, receiver, screenshot);
+            insert(database, receiver, content);
+            database.setTransactionSuccessful();
+        } finally {
+            database.endTransaction();
+        }
+    }
+
+    private void insert(SQLiteDatabase database, String receiver, String screenshot) {
         ContentValues values = new ContentValues();
         values.put("receiver", receiver);
         values.put("screenshot", screenshot);
-        getWritableDatabase().insertWithOnConflict("receipts", null, values, SQLiteDatabase.CONFLICT_IGNORE);
+        database.insertWithOnConflict("receipts", null, values, SQLiteDatabase.CONFLICT_IGNORE);
     }
 }

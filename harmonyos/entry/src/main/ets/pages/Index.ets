@@ -1,6 +1,7 @@
 import { abilityAccessCtrl, common } from '@kit.AbilityKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
-import { createPairing, loadPairing, Pairing, savePairing, SYNC_SESSION_START, withSyncEnabled } from '../sync/Pairing';
+import { clearPairing, createPairing, loadPairing, Pairing, savePairing, withSyncEnabled } from '../sync/Pairing';
+import { ManualResult, SelectedPhoto, selectPhotos, sendSelection } from '../sync/ManualSync';
 import { isPairingCode, parseReceiverHost, RECEIVER_PORT } from '../sync/Protocol';
 import { Receiver } from '../sync/Receiver';
 import { GALLERY_PERMISSION, galleryAllowed, syncScreenshots, SyncCancellation, SyncResult } from '../sync/ScreenshotSync';
@@ -19,11 +20,17 @@ struct Index {
   @State private syncEnabled: boolean = false;
   @State private hasPairing: boolean = false;
   @State private activeHost: string = '';
+  @State private cutoffLabel: string = '';
+  @State private showSettings: boolean = false;
   @State private galleryGranted: boolean = false;
   @State private changingSettings: boolean = false;
   @State private uploading: boolean = false;
   @State private status: string = '等待配对';
   @State private scheduleStatus: string = '';
+  @State private selecting: boolean = false;
+  @State private selection: SelectedPhoto[] = [];
+  @State private manualSending: boolean = false;
+  @State private manualStatus: string = '';
 
   private getContext(): common.UIAbilityContext {
     return this.getUIContext().getHostContext() as common.UIAbilityContext;
@@ -34,6 +41,8 @@ struct Index {
   private interval: number = -1;
   private debounce: number = -1;
   private activeSync: SyncCancellation | undefined;
+  private activeManual: SyncCancellation | undefined;
+  private manualTarget: Pairing | undefined;
   private scheduleUpdate: Promise<void> = Promise.resolve();
   private pageReady: boolean = false;
 
@@ -66,6 +75,10 @@ struct Index {
   aboutToDisappear(): void {
     this.pageReady = false;
     this.stopListening();
+    this.activeManual?.stop();
+    this.activeManual = undefined;
+    this.manualSending = false;
+    this.clearSelection();
   }
 
   private applyPairing(pairing: Pairing): void {
@@ -73,11 +86,12 @@ struct Index {
     this.syncEnabled = pairing.enabled;
     this.hasPairing = true;
     this.activeHost = pairing.host;
-  }
-
-  private hasCurrentSession(pairing: Pairing | undefined): boolean {
-    return pairing?.sessionStartedMs !== undefined &&
-      pairing.sessionStartedMs === AppStorage.get<number>(SYNC_SESSION_START);
+    if (pairing.pairedAfterMs !== undefined) {
+      const date = new Date(pairing.pairedAfterMs);
+      this.cutoffLabel = date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
+    } else {
+      this.cutoffLabel = '';
+    }
   }
 
   private foregroundChanged(): void {
@@ -86,6 +100,11 @@ struct Index {
       return;
     }
     this.refreshPermission();
+    const saved: Pairing | undefined = this.pairing;
+    if (saved && saved.pairedAfterMs === undefined) {
+      this.verifyConnection(saved.host, saved.token);
+      return;
+    }
     this.startListening();
     if (this.hasPairing) {
       this.refreshSchedule();
@@ -104,7 +123,7 @@ struct Index {
   }
 
   private startListening(): void {
-    if (!this.foreground || !this.syncEnabled || !this.galleryGranted || !this.hasCurrentSession(this.pairing) ||
+    if (!this.foreground || !this.syncEnabled || !this.galleryGranted || this.pairing?.pairedAfterMs === undefined ||
       this.interval !== -1) {
       return;
     }
@@ -178,7 +197,7 @@ struct Index {
   }
 
   private async connect(): Promise<void> {
-    if (this.changingSettings || this.uploading) {
+    if (this.changingSettings || this.manualSending || this.selecting) {
       return;
     }
     const host: string | undefined = parseReceiverHost(this.host);
@@ -191,35 +210,70 @@ struct Index {
       this.status = '请输入 Mac 接收端显示的 24 位配对码';
       return;
     }
-    const startedMs: number | undefined = AppStorage.get<number>(SYNC_SESSION_START);
-    if (startedMs === undefined) {
-      this.status = '无法确定本次启动时间，请重新打开应用';
+    await this.verifyConnection(host, token);
+  }
+
+  private async verifyConnection(host: string, token: string): Promise<void> {
+    if (this.changingSettings || this.manualSending || this.selecting) {
       return;
     }
-
     this.changingSettings = true;
     this.status = '正在连接 Mac…';
     let receiver: Receiver | undefined;
     try {
       receiver = new Receiver(host, token);
       await receiver.verify();
-      await this.authorizeGallery();
-      const pairing: Pairing = createPairing(host, token, startedMs, this.pairing);
+      const context: common.UIAbilityContext = this.getContext();
+      const pairing: Pairing = createPairing(context, host, token, Date.now(), this.pairing);
       savePairing(this.getContext(), pairing);
+      this.stopListening();
+      if (this.manualTarget && (this.manualTarget.destination !== pairing.destination ||
+        this.manualTarget.host !== pairing.host)) {
+        this.clearSelection();
+        this.manualStatus = 'Mac 接收端已更改，请重新选图';
+      }
       this.applyPairing(pairing);
       this.host = host;
       this.token = token;
-      this.status = pairing.enabled ? 'Mac 已配对' : '同步已停止';
+      this.showSettings = false;
+      this.refreshPermission();
+      this.status = pairing.enabled && !this.galleryGranted ? '允许访问相册后可自动同步' : 'Mac 已连接';
       await this.refreshSchedule();
       this.startListening();
     } catch (error) {
-      this.status = error instanceof Error ? error.message : '配对失败，请检查 Mac 和相册权限';
+      this.status = error instanceof Error ? error.message : '配对失败，请检查 Mac 接收端';
       return;
     } finally {
       receiver?.close();
       this.changingSettings = false;
     }
     this.sync();
+  }
+
+  private async disconnect(): Promise<void> {
+    if (this.changingSettings || this.manualSending || this.selecting) {
+      return;
+    }
+    this.changingSettings = true;
+    try {
+      clearPairing(this.getContext());
+      this.stopListening();
+      this.clearSelection();
+      this.pairing = undefined;
+      this.hasPairing = false;
+      this.syncEnabled = false;
+      this.activeHost = '';
+      this.cutoffLabel = '';
+      this.token = '';
+      this.showSettings = false;
+      this.status = '已断开 Mac';
+      this.manualStatus = '';
+      await this.refreshSchedule();
+    } catch (_error) {
+      this.status = '暂时无法断开 Mac，请稍后重试';
+    } finally {
+      this.changingSettings = false;
+    }
   }
 
   private async setSyncEnabled(enabled: boolean): Promise<void> {
@@ -254,7 +308,7 @@ struct Index {
   private refreshSchedule(): Promise<void> {
     this.scheduleUpdate = this.scheduleUpdate.then(async (): Promise<void> => {
       const revision: number | undefined = this.syncEnabled && this.galleryGranted &&
-        this.hasCurrentSession(this.pairing) ? this.pairing?.revision : undefined;
+        this.pairing?.pairedAfterMs !== undefined ? this.pairing.revision : undefined;
       try {
         await updateSchedule(this.getContext().abilityInfo.bundleName, revision);
         this.scheduleStatus = revision !== undefined ? '后台补传由系统择机执行。' : '';
@@ -270,8 +324,8 @@ struct Index {
     if (!pairing?.enabled || !this.foreground || this.uploading || this.changingSettings) {
       return;
     }
-    if (!this.hasCurrentSession(pairing)) {
-      this.status = '无法开始本次同步，请重新验证连接';
+    if (pairing.pairedAfterMs === undefined) {
+      this.verifyConnection(pairing.host, pairing.token);
       return;
     }
     this.refreshPermission();
@@ -308,15 +362,90 @@ struct Index {
     }
   }
 
+  private clearSelection(): void {
+    const selection: SelectedPhoto[] = this.selection;
+    this.selection = [];
+    this.manualTarget = undefined;
+    for (const item of selection) {
+      item.thumbnail?.release().catch((): void => {});
+    }
+  }
+
+  private async pickImages(): Promise<void> {
+    const pairing: Pairing | undefined = this.pairing;
+    if (!pairing || this.selecting || this.manualSending || this.changingSettings) {
+      return;
+    }
+    this.selecting = true;
+    this.manualStatus = '';
+    try {
+      const picked: SelectedPhoto[] = await selectPhotos(this.getContext(), pairing);
+      if (!this.pageReady || this.pairing?.destination !== pairing.destination || this.pairing?.host !== pairing.host) {
+        for (const item of picked) {
+          item.thumbnail?.release().catch((): void => {});
+        }
+        return;
+      }
+      if (picked.length > 0) {
+        this.clearSelection();
+        this.selection = picked;
+        this.manualTarget = pairing;
+      }
+    } catch (_error) {
+      this.manualStatus = '无法打开系统相册，请重试';
+    } finally {
+      this.selecting = false;
+    }
+  }
+
+  private async sendImages(): Promise<void> {
+    const target: Pairing | undefined = this.manualTarget;
+    if (!target || this.manualSending || this.selection.length === 0 || this.changingSettings) {
+      return;
+    }
+    const cancellation = new SyncCancellation();
+    this.activeManual = cancellation;
+    this.manualSending = true;
+    this.manualStatus = '正在手动发送…';
+    try {
+      const result: ManualResult = await sendSelection(this.getContext(), target, this.selection, cancellation);
+      if (this.activeManual !== cancellation) {
+        return;
+      }
+      const completed = new Set(result.completed);
+      this.selection = this.selection.filter((item: SelectedPhoto): boolean => {
+        if (!completed.has(item.uri)) {
+          return true;
+        }
+        item.thumbnail?.release().catch((): void => {});
+        return false;
+      });
+      if (this.selection.length === 0) {
+        this.manualTarget = undefined;
+        this.manualStatus = `已同步 ${completed.size} 张图片`;
+      } else if (cancellation.stopped) {
+        this.manualStatus = `已取消本次发送，剩余 ${this.selection.length} 张可重试`;
+      } else {
+        const message: string = result.error || '请检查 Mac 接收端后重试';
+        this.manualStatus = `剩余 ${this.selection.length} 张。${message}`;
+      }
+    } finally {
+      if (this.activeManual === cancellation) {
+        this.activeManual = undefined;
+        this.manualSending = false;
+      }
+    }
+  }
+
   build() {
     Scroll() {
       Column({ space: 18 }) {
         Column({ space: 7 }) {
-          Text('截图同步')
+          Text($r('app.string.app_name'))
             .fontSize(34)
             .fontWeight(FontWeight.Bold)
             .fontColor(INK)
-          Text('将手机截图通过局域网发到 Mac')
+          Text($r('app.string.module_description'))
             .fontSize(15)
             .fontColor(MUTED)
         }
@@ -325,7 +454,8 @@ struct Index {
         .margin({ top: 18, bottom: 4 })
 
         Column({ space: 9 }) {
-          Text(this.syncEnabled ? '自动同步已开启' : this.hasPairing ? '自动同步已暂停' : '尚未连接 Mac')
+          Text(!this.hasPairing ? '尚未连接 Mac' : !this.syncEnabled ? '自动同步已暂停' :
+            this.galleryGranted ? '自动同步已开启' : '等待相册授权')
             .fontSize(20)
             .fontWeight(FontWeight.Bold)
             .fontColor(INK)
@@ -336,6 +466,11 @@ struct Index {
             Text(`Mac · ${this.activeHost}:${RECEIVER_PORT}`)
               .fontSize(14)
               .fontColor(MUTED)
+            if (this.cutoffLabel.length > 0) {
+              Text(`自动同步起点 · ${this.cutoffLabel}`)
+                .fontSize(14)
+                .fontColor(MUTED)
+            }
           }
           if (this.scheduleStatus.length > 0) {
             Text(this.scheduleStatus)
@@ -343,27 +478,19 @@ struct Index {
               .fontColor(MUTED)
           }
           if (this.syncEnabled && !this.galleryGranted) {
-            Button('授权读取相册')
+            Button('允许访问相册')
               .backgroundColor(BLUE)
               .enabled(!this.changingSettings)
               .onClick(() => { this.grantGalleryAccess(); })
           }
           if (this.syncEnabled) {
-            Row({ space: 10 }) {
-              if (this.galleryGranted) {
-                Button('立即同步')
-                  .backgroundColor(BLUE)
-                  .enabled(!this.uploading && !this.changingSettings)
-                  .onClick(() => { this.sync(); })
-              }
-              Button('停止同步')
-                .backgroundColor('#EAF0FF')
-                .fontColor(INK)
-                .enabled(!this.changingSettings)
-                .onClick(() => { this.setSyncEnabled(false); })
-            }
+            Button('暂停自动同步')
+              .backgroundColor('#EAF0FF')
+              .fontColor(INK)
+              .enabled(!this.changingSettings)
+              .onClick(() => { this.setSyncEnabled(false); })
           } else if (this.hasPairing) {
-            Button('继续同步')
+            Button('继续自动同步')
               .backgroundColor(BLUE)
               .enabled(!this.changingSettings)
               .onClick(() => { this.setSyncEnabled(true); })
@@ -375,49 +502,138 @@ struct Index {
         .backgroundColor('#FFFFFF')
         .borderRadius(22)
 
-        Column({ space: 12 }) {
-          Text('连接设置')
-            .fontSize(20)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(INK)
-          Text('打开 Mac 接收端，填写它显示的地址和配对码。')
-            .fontSize(14)
-            .fontColor(MUTED)
-          Text('Mac 局域网地址')
-            .fontSize(14)
-            .fontColor(INK)
-          TextInput({ text: this.host, placeholder: '192.168.1.20:43871' })
-            .type(InputType.Normal)
-            .width('100%')
-            .backgroundColor('#F3F6FC')
-            .fontColor(INK)
-            .maxLength(21)
-            .enabled(!this.changingSettings)
-            .onChange((value: string) => { this.host = value; })
-          Text('配对码')
-            .fontSize(14)
-            .fontColor(INK)
-          TextInput({ text: this.token, placeholder: '24 位配对码' })
-            .type(InputType.Password)
-            .width('100%')
-            .backgroundColor('#F3F6FC')
-            .fontColor(INK)
-            .maxLength(24)
-            .enabled(!this.changingSettings)
-            .onChange((value: string) => { this.token = value; })
-          Button(this.hasPairing ? '验证并保存' : '配对并开启同步')
+        if (this.hasPairing) {
+          Button(this.selecting ? '正在选择图片…' : '手动选图')
             .width('100%')
             .backgroundColor(BLUE)
-            .fontSize(16)
-            .fontWeight(FontWeight.Medium)
-            .enabled(!this.changingSettings && !this.uploading)
-            .onClick(() => { this.connect(); })
+            .enabled(!this.manualSending && !this.selecting && !this.changingSettings)
+            .onClick(() => { this.pickImages(); })
+
+          if (this.selection.length > 0) {
+            Column({ space: 10 }) {
+              Text('确认发送')
+                .fontSize(20)
+                .fontWeight(FontWeight.Bold)
+                .fontColor(INK)
+              Text(`将 ${this.selection.length} 张图片发送到 Mac · ${this.activeHost}:${RECEIVER_PORT}`)
+                .fontSize(14)
+                .fontColor(MUTED)
+              Scroll() {
+                Row({ space: 8 }) {
+                  ForEach(this.selection, (item: SelectedPhoto) => {
+                    if (item.thumbnail) {
+                      Image(item.thumbnail)
+                        .objectFit(ImageFit.Cover)
+                        .width(76)
+                        .height(76)
+                        .borderRadius(8)
+                        .accessibilityText(item.name || '选中的图片')
+                    } else {
+                      Text(item.name || '选中的图片')
+                        .fontSize(11)
+                        .fontColor(MUTED)
+                        .textAlign(TextAlign.Center)
+                        .maxLines(3)
+                        .width(76)
+                        .height(76)
+                        .backgroundColor('#EAF0FF')
+                        .borderRadius(8)
+                    }
+                  }, (item: SelectedPhoto): string => item.uri)
+                }
+              }
+              .scrollable(ScrollDirection.Horizontal)
+              .scrollBar(BarState.Auto)
+              if (this.manualSending) {
+                Button('取消本次发送')
+                  .backgroundColor('#EAF0FF')
+                  .fontColor(INK)
+                  .onClick(() => { this.activeManual?.stop(); })
+              } else {
+                Row({ space: 8 }) {
+                  Button(`发送 ${this.selection.length} 张`)
+                    .backgroundColor(BLUE)
+                    .enabled(!this.changingSettings && !this.selecting)
+                    .onClick(() => { this.sendImages(); })
+                  Button('返回')
+                    .backgroundColor('#EAF0FF')
+                    .fontColor(INK)
+                    .enabled(!this.selecting)
+                    .onClick(() => { this.clearSelection(); this.manualStatus = ''; })
+                }
+              }
+            }
+            .alignItems(HorizontalAlign.Start)
+            .width('100%')
+            .padding(20)
+            .backgroundColor('#FFFFFF')
+            .borderRadius(22)
+          }
+          if (this.manualStatus.length > 0) {
+            Text(this.manualStatus)
+              .fontSize(14)
+              .fontColor(MUTED)
+              .width('100%')
+          }
+          Button(this.showSettings ? '收起连接设置' : '连接设置')
+            .backgroundColor('#EAF0FF')
+            .fontColor(INK)
+            .enabled(!this.manualSending && !this.selecting && !this.changingSettings)
+            .onClick(() => { this.showSettings = !this.showSettings; })
         }
-        .alignItems(HorizontalAlign.Start)
-        .width('100%')
-        .padding(20)
-        .backgroundColor('#FFFFFF')
-        .borderRadius(22)
+
+        if (!this.hasPairing || this.showSettings) {
+          Column({ space: 12 }) {
+            Text(this.hasPairing ? '连接设置' : '连接 Mac')
+              .fontSize(20)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(INK)
+            Text('打开 Mac 接收端，填写它显示的地址和配对码。')
+              .fontSize(14)
+              .fontColor(MUTED)
+            Text('Mac 局域网地址')
+              .fontSize(14)
+              .fontColor(INK)
+            TextInput({ text: this.host, placeholder: '192.168.1.20:43871' })
+              .type(InputType.Normal)
+              .width('100%')
+              .backgroundColor('#F3F6FC')
+              .fontColor(INK)
+              .maxLength(21)
+              .enabled(!this.changingSettings)
+              .onChange((value: string) => { this.host = value; })
+            Text('配对码')
+              .fontSize(14)
+              .fontColor(INK)
+            TextInput({ text: this.token, placeholder: '24 位配对码' })
+              .type(InputType.Password)
+              .width('100%')
+              .backgroundColor('#F3F6FC')
+              .fontColor(INK)
+              .maxLength(24)
+              .enabled(!this.changingSettings)
+              .onChange((value: string) => { this.token = value; })
+            Button(this.hasPairing ? '验证并保存' : '连接 Mac')
+              .width('100%')
+              .backgroundColor(BLUE)
+              .fontSize(16)
+              .fontWeight(FontWeight.Medium)
+              .enabled(!this.changingSettings && !this.manualSending && !this.selecting)
+              .onClick(() => { this.connect(); })
+            if (this.hasPairing) {
+              Button('断开 Mac')
+                .backgroundColor('#EAF0FF')
+                .fontColor(INK)
+                .enabled(!this.changingSettings && !this.manualSending && !this.selecting)
+                .onClick(() => { this.disconnect(); })
+            }
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .padding(20)
+          .backgroundColor('#FFFFFF')
+          .borderRadius(22)
+        }
 
         Text('请在可信的 Wi-Fi 下使用。截图与配对码通过局域网 HTTP 传输。')
           .fontSize(13)

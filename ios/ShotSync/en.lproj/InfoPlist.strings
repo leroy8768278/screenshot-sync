@@ -1,0 +1,4 @@
+"CFBundleDisplayName" = "SnapRelay";
+"CFBundleName" = "SnapRelay";
+"NSPhotoLibraryUsageDescription" = "Automatically send screenshots taken after pairing to your Mac.";
+"NSLocalNetworkUsageDescription" = "Connect to your paired Mac on the local network to send new screenshots and images you select.";

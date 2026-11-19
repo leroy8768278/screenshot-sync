@@ -16,24 +16,35 @@ final class SyncSettings {
     private static final String CODE = "code";
     private static final String AUTO = "auto";
     private static final String PAUSED = "paused";
-    private static final String LAUNCH_STARTED_AT = "launch_started_at";
+    private static final String CONNECTED_AT = "connected_at";
     private static final String GENERATION = "generation";
     private static final String INSTALLATION = "installation";
     private static final Object SETTINGS_LOCK = new Object();
-    private static boolean launchRecorded;
 
-    record Pairing(String host, String code, boolean automatic, boolean paused, long launchStartedAt,
+    record Pairing(String host, String code, boolean paused, long connectedAt,
                    String generation, String installation) {
         boolean isConfigured() {
             return !host.isEmpty() && !code.isEmpty();
+        }
+
+        boolean isVerified() {
+            return isConfigured() && connectedAt > 0;
         }
 
         String receiverId() {
             return digest(code);
         }
 
-        boolean canSync(boolean manual) {
-            return isConfigured() && launchStartedAt > 0 && !paused && (manual || automatic);
+        String deviceId() {
+            return installation.replace("-", "").toLowerCase(Locale.ROOT);
+        }
+
+        boolean canSync() {
+            return isVerified() && !paused;
+        }
+
+        boolean sameSession(Pairing other) {
+            return isVerified() && connectedAt == other.connectedAt && code.equals(other.code);
         }
     }
 
@@ -47,46 +58,33 @@ final class SyncSettings {
             return new Pairing(
                 prefs.getString(HOST, ""),
                 prefs.getString(CODE, ""),
-                prefs.getBoolean(AUTO, true),
-                prefs.getBoolean(PAUSED, false),
-                prefs.getLong(LAUNCH_STARTED_AT, 0),
+                prefs.getBoolean(PAUSED, false) || !prefs.getBoolean(AUTO, true),
+                prefs.getLong(CONNECTED_AT, 0),
                 prefs.getString(GENERATION, ""),
                 prefs.getString(INSTALLATION, "")
             );
         }
     }
 
-    static boolean startLaunch(Context context) {
-        synchronized (SETTINGS_LOCK) {
-            if (launchRecorded) {
-                return false;
-            }
-            launchRecorded = true;
-            preferences(context).edit()
-                .putLong(LAUNCH_STARTED_AT, System.currentTimeMillis())
-                .putString(GENERATION, UUID.randomUUID().toString())
-                .apply();
-            return true;
-        }
-    }
-
-    static boolean save(Context context, String host, String code, boolean automatic) {
+    static boolean saveVerified(Context context, String host, String code, long verifiedAt) {
         synchronized (SETTINGS_LOCK) {
             Pairing old = read(context);
-            boolean unchanged = old.host.equals(host) && old.code.equals(code) && old.automatic == automatic;
-            if (unchanged) {
-                return true;
-            }
-
+            boolean sameReceiver = old.isConfigured() && old.code.equals(code);
+            boolean paused = sameReceiver && old.paused;
+            long cutoff = sameReceiver && old.isVerified() ? old.connectedAt : verifiedAt;
             String installation = old.installation.isEmpty()
                 ? UUID.randomUUID().toString() : old.installation;
+            boolean endpointChanged = !old.host.equals(host) || !sameReceiver || !old.isVerified();
             return preferences(context).edit()
                 .putString(HOST, host)
                 .putString(CODE, code)
-                .putBoolean(AUTO, automatic)
-                .putString(GENERATION, UUID.randomUUID().toString())
+                .remove(AUTO)
+                .remove("launch_started_at")
+                .putBoolean(PAUSED, paused)
+                .putLong(CONNECTED_AT, cutoff)
+                .putString(GENERATION, endpointChanged ? UUID.randomUUID().toString() : old.generation)
                 .putString(INSTALLATION, installation)
-                .putString(STATUS, context.getString(old.paused ? R.string.status_paused : R.string.status_saved))
+                .putString(STATUS, context.getString(paused ? R.string.status_paused : R.string.status_connected))
                 .commit();
         }
     }
@@ -94,13 +92,29 @@ final class SyncSettings {
     static boolean setPaused(Context context, boolean paused) {
         synchronized (SETTINGS_LOCK) {
             Pairing pairing = read(context);
-            if (!pairing.isConfigured()) {
+            if (!pairing.isVerified()) {
                 return false;
             }
             return preferences(context).edit()
+                .remove(AUTO)
                 .putBoolean(PAUSED, paused)
                 .putString(GENERATION, UUID.randomUUID().toString())
-                .putString(STATUS, context.getString(paused ? R.string.status_paused : R.string.status_saved))
+                .putString(STATUS, context.getString(paused ? R.string.status_paused : R.string.status_connected))
+                .commit();
+        }
+    }
+
+    static boolean disconnect(Context context) {
+        synchronized (SETTINGS_LOCK) {
+            return preferences(context).edit()
+                .remove(HOST)
+                .remove(CODE)
+                .remove(CONNECTED_AT)
+                .remove(PAUSED)
+                .remove(AUTO)
+                .remove("launch_started_at")
+                .remove(STATUS)
+                .putString(GENERATION, UUID.randomUUID().toString())
                 .commit();
         }
     }
@@ -164,7 +178,7 @@ final class SyncSettings {
         }
     }
 
-    private static String bytesToHex(byte[] bytes) {
+    static String bytesToHex(byte[] bytes) {
         StringBuilder result = new StringBuilder(bytes.length * 2);
         for (byte value : bytes) {
             result.append(Character.forDigit((value >>> 4) & 15, 16));

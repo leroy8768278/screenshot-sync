@@ -36,15 +36,20 @@ final class ReceiverModel: ObservableObject {
     @Published private(set) var token: String
     @Published private(set) var addresses = [LocalAddress]()
     @Published private(set) var recent = [ScreenshotSource?: [ReceivedScreenshot]]()
+    @Published private(set) var isLoadingInbox = false
+    @Published private var deviceNames: [String: String]
     @Published var errorMessage: String?
 
+    private static let deviceNamesKey = "screenshotDeviceNames"
     private let defaults: UserDefaults
     private let pathMonitor = NWPathMonitor()
     private var receiver: Receiver?
     private var generation = UUID()
+    private var needsInboxRefresh = false
 
-    init() {
-        defaults = .standard
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        deviceNames = defaults.dictionary(forKey: Self.deviceNamesKey) as? [String: String] ?? [:]
         let path = defaults.string(forKey: "inboxPath")
         let defaultFolder = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Pictures/截图同步", isDirectory: true)
@@ -138,14 +143,106 @@ final class ReceiverModel: ObservableObject {
         panel.canChooseDirectories = true
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let selected = panel.url else { return }
+        guard folder != selected else { return }
         folder = selected
+        recent = [:]
         defaults.set(folder.path, forKey: "inboxPath")
         receiver?.configure(folder: folder, token: token)
         refreshRecent()
     }
 
     func refreshRecent() {
-        recent = Inbox.recent(in: folder)
+        guard !isLoadingInbox else {
+            needsInboxRefresh = true
+            return
+        }
+        isLoadingInbox = true
+        let currentFolder = folder
+        let scan = Task.detached(priority: .utility) { try Inbox.recent(in: currentFolder) }
+        Task { [weak self] in
+            let result = await scan.result
+            guard let self else { return }
+            if folder == currentFolder {
+                switch result {
+                case .success(let received):
+                    registerDevices(in: received)
+                    recent = received
+                case .failure(let error):
+                    errorMessage = "无法读取截图文件夹。\(error.localizedDescription)"
+                }
+            }
+            isLoadingInbox = false
+            if needsInboxRefresh {
+                needsInboxRefresh = false
+                refreshRecent()
+            }
+        }
+    }
+
+    func knownDevices(for source: ScreenshotSource) -> [ScreenshotDevice] {
+        deviceNames.keys.compactMap(ScreenshotDevice.init(id:)).filter { $0.source == source }.sorted {
+            let order = name(for: $0).localizedStandardCompare(name(for: $1))
+            return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
+        }
+    }
+
+    func name(for device: ScreenshotDevice) -> String {
+        deviceNames[device.id] ?? defaultNamePrefix(for: device.source)
+    }
+
+    func rename(_ device: ScreenshotDevice, to name: String) throws {
+        guard deviceNames[device.id] != nil else { throw DeviceNameError.unknownDevice }
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (1...24).contains(name.count), name.rangeOfCharacter(from: .controlCharacters) == nil else {
+            throw DeviceNameError.invalidName
+        }
+        let match = nameKey(name)
+        guard match != nameKey("全部手机"), match != nameKey("未识别设备"),
+              !knownDevices(for: device.source).contains(where: { $0 != device && nameKey(self.name(for: $0)) == match }) else {
+            throw DeviceNameError.nameUnavailable
+        }
+        var renamed = deviceNames
+        renamed[device.id] = name
+        saveDeviceNames(renamed)
+    }
+
+    private func registerDevices(in received: [ScreenshotSource?: [ReceivedScreenshot]]) {
+        var names = deviceNames
+        for source in ScreenshotSource.allCases {
+            let existingIDs = knownDevices(for: source)
+            var usedNames = Set(existingIDs.map { nameKey(name(for: $0)) })
+            var ordinal = 1
+            for screenshot in received[source, default: []].reversed() {
+                guard let device = screenshot.device, names[device.id] == nil else { continue }
+                let prefix = defaultNamePrefix(for: source)
+                var alias = "\(prefix) \(ordinal)"
+                while usedNames.contains(nameKey(alias)) {
+                    ordinal += 1
+                    alias = "\(prefix) \(ordinal)"
+                }
+                names[device.id] = alias
+                usedNames.insert(nameKey(alias))
+                ordinal += 1
+            }
+        }
+        if names != deviceNames { saveDeviceNames(names) }
+    }
+
+    private func nameKey(_ name: String) -> String {
+        name.precomposedStringWithCanonicalMapping.folding(options: [.caseInsensitive, .widthInsensitive], locale: nil)
+    }
+
+    private func defaultNamePrefix(for source: ScreenshotSource) -> String {
+        switch source {
+        case .iOS: "iPhone"
+        case .android: "Android 手机"
+        case .harmony: "鸿蒙手机"
+        }
+    }
+
+    private func saveDeviceNames(_ names: [String: String]) {
+        defaults.set(names, forKey: Self.deviceNamesKey)
+        deviceNames = names
     }
 
     func openFolder() {
@@ -154,6 +251,20 @@ final class ReceiverModel: ObservableObject {
             NSWorkspace.shared.open(folder)
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private enum DeviceNameError: LocalizedError {
+        case unknownDevice
+        case invalidName
+        case nameUnavailable
+
+        var errorDescription: String? {
+            switch self {
+            case .unknownDevice: "找不到此手机。"
+            case .invalidName: "请输入 1–24 个字符的名称。"
+            case .nameUnavailable: "此名称已在手机标签中使用。"
+            }
         }
     }
 }

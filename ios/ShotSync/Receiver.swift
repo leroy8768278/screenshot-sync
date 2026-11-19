@@ -8,11 +8,12 @@ struct Receiver: Codable, Equatable {
     let port: Int
     let code: String
     var automatic: Bool
+    var pairedAt: Date?
 
     var displayAddress: String { "\(address):\(port)" }
     var historyKey: String { digest(code) }
 
-    init(address: String, port: String, code: String, automatic: Bool) throws {
+    init(address: String, port: String, code: String, automatic: Bool, pairedAt: Date? = nil) throws {
         let address = address.trimmingCharacters(in: .whitespacesAndNewlines)
         var binaryAddress = in_addr()
         guard inet_pton(AF_INET, address, &binaryAddress) == 1 else {
@@ -41,6 +42,7 @@ struct Receiver: Codable, Equatable {
         self.port = port
         self.code = code
         self.automatic = automatic
+        self.pairedAt = pairedAt
     }
 
     func request(path: String) -> URLRequest {
@@ -77,6 +79,7 @@ final class ReceiverClient: NSObject, URLSessionTaskDelegate {
         request.httpMethod = "POST"
         request.setValue(image.mimeType, forHTTPHeaderField: "Content-Type")
         request.setValue(id, forHTTPHeaderField: "X-Screenshot-ID")
+        request.setValue(InstallationIdentity.deviceID, forHTTPHeaderField: "X-Device-ID")
         request.setValue(filename, forHTTPHeaderField: "X-Filename")
         let (_, response) = try await session.upload(for: request, from: image.bytes)
         try validate(response)
@@ -102,6 +105,30 @@ final class ReceiverClient: NSObject, URLSessionTaskDelegate {
     }
 }
 
+private enum InstallationIdentity {
+    static let deviceID = try? loadOrCreate()
+
+    private static func loadOrCreate() throws -> String {
+        var directory = URL.applicationSupportDirectory.appending(path: "InstallationIdentity", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var attributes = URLResourceValues()
+        attributes.isExcludedFromBackup = true
+        try directory.setResourceValues(attributes)
+
+        let file = directory.appending(path: "device-id")
+        if FileManager.default.fileExists(atPath: file.path) {
+            let stored = try Data(contentsOf: file)
+            if stored.count == 32, stored.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) {
+                return String(decoding: stored, as: UTF8.self)
+            }
+        }
+
+        let id = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        try Data(id.utf8).write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        return id
+    }
+}
+
 enum ReceiverStore {
     private static var key: [String: Any] {
         [
@@ -119,7 +146,8 @@ enum ReceiverStore {
         guard status == errSecSuccess, let data = result as? Data else { throw SyncIssue.storage }
         let receiver = try JSONDecoder().decode(Receiver.self, from: data)
         return try Receiver(
-            address: receiver.address, port: String(receiver.port), code: receiver.code, automatic: receiver.automatic
+            address: receiver.address, port: String(receiver.port), code: receiver.code,
+            automatic: receiver.automatic, pairedAt: receiver.pairedAt
         )
     }
 
@@ -134,6 +162,11 @@ enum ReceiverStore {
         } else if status != errSecSuccess {
             throw SyncIssue.storage
         }
+    }
+
+    static func clear() throws {
+        let status = SecItemDelete(key as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw SyncIssue.storage }
     }
 }
 
@@ -180,13 +213,15 @@ struct SyncHistory {
     }
 }
 
-func digest(_ value: String) -> String {
-    SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+func digest(_ data: Data) -> String {
+    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
 }
+
+func digest(_ value: String) -> String { digest(Data(value.utf8)) }
 
 enum SyncIssue: LocalizedError {
     case invalidAddress, invalidPort, invalidCode, invalidResponse, accessDenied
-    case imageTooLarge, unsupportedImage, unavailableImage, storage, syncBusy
+    case imageTooLarge, unsupportedImage, unavailableImage, storage, syncBusy, receiverChanged
     case httpStatus(Int)
 
     var errorDescription: String? {
@@ -196,11 +231,12 @@ enum SyncIssue: LocalizedError {
         case .invalidCode: "请输入 Mac 显示的 24 位配对码。"
         case .invalidResponse: "Mac 返回了无法识别的响应。"
         case .accessDenied: "配对码无效，请核对 Mac 上的配对码。"
-        case .imageTooLarge: "有截图超过了 64 MB，已跳过。"
-        case .unsupportedImage: "有截图的图像格式无法发送，已跳过。"
-        case .unavailableImage: "有截图暂未下载到手机，下载后会重新尝试。"
+        case .imageTooLarge: "图片超过 64 MB，无法发送。"
+        case .unsupportedImage: "图片格式无法发送。"
+        case .unavailableImage: "无法读取图片。请确认已下载到手机后重试。"
         case .storage: "无法访问本机同步设置，请解锁手机后重试。"
-        case .syncBusy: "正在发送截图，请稍后重试。"
+        case .syncBusy: "正在处理另一次连接或手动发送，请稍后重试。"
+        case .receiverChanged: "Mac 连接已变更，请重新选图。"
         case .httpStatus(let status): "Mac 返回了 HTTP \(status)。"
         }
     }

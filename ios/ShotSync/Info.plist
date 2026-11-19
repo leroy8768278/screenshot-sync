@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleDevelopmentRegion</key>
-    <string>zh_CN</string>
+    <string>$(DEVELOPMENT_LANGUAGE)</string>
     <key>CFBundleDisplayName</key>
-    <string>截图同步</string>
+    <string>即图</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key>
@@ -13,7 +13,7 @@
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>$(PRODUCT_NAME)</string>
+    <string>即图</string>
     <key>CFBundlePackageType</key>
     <string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
     <key>CFBundleShortVersionString</key>
@@ -23,11 +23,11 @@
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>NSPhotoLibraryUsageDescription</key>
-    <string>识别相册中的截图，并将它们发送到你配对的 Mac。</string>
+    <string>识别配对后截取的新截图并自动发送到你的 Mac。</string>
     <key>NSPhotoLibraryPreventAutomaticLimitedAccessAlert</key>
     <true/>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>在当前局域网内连接你配对的 Mac 并发送截图。</string>
+    <string>连接局域网内配对的 Mac，发送新截图和手动选择的图片。</string>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key>

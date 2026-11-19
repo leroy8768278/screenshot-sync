@@ -1,14 +1,29 @@
-import Photos
+import CoreTransferable
+import ImageIO
+import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 import os
 
-struct ScreenshotData: Sendable {
+struct ScreenshotData: Sendable, Transferable {
     fileprivate static let maxBytes = 64 * 1024 * 1024
 
     let bytes: Data
     let mimeType: String
     let fileExtension: String
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .image) { received in
+            let source = CGImageSourceCreateWithURL(received.file as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary)
+            let format = try imageFormat(source.flatMap(CGImageSourceGetType) as String?)
+            let size = try received.file.resourceValues(forKeys: [.fileSizeKey]).fileSize
+            guard let size, size > 0 else { throw SyncIssue.unavailableImage }
+            guard size <= maxBytes else { throw SyncIssue.imageTooLarge }
+            let data = try Data(contentsOf: received.file, options: .mappedIfSafe)
+            guard data.count <= maxBytes else { throw SyncIssue.imageTooLarge }
+            return Self(bytes: data, mimeType: format.mime, fileExtension: format.ext)
+        }
+    }
 
     static func load(_ asset: PHAsset) async throws -> Self {
         let resources = PHAssetResource.assetResources(for: asset)
@@ -71,6 +86,25 @@ struct ScreenshotData: Sendable {
             throw SyncIssue.unsupportedImage
         }
         return (mime, ext)
+    }
+}
+
+struct PickerThumbnail: Transferable, Sendable {
+    let image: CGImage
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .image) { received in
+            let options: CFDictionary = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: 240,
+            ] as CFDictionary
+            guard let source = CGImageSourceCreateWithURL(received.file as CFURL, nil),
+                  let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options) else {
+                throw SyncIssue.unavailableImage
+            }
+            return Self(image: image)
+        }
     }
 }
 
@@ -161,11 +195,18 @@ private final class LibraryObserver: NSObject, PHPhotoLibraryChangeObserver {
 @MainActor
 final class PhotoSync: ObservableObject {
     static let shared = PhotoSync()
-    private static let sessionStartKey = "screenshotSyncSessionStart"
+
+    struct ManualResult {
+        var remaining: [PhotosPickerItem]
+        var sent = 0
+        var alreadySent = 0
+        var message: String?
+    }
 
     @Published private(set) var receiver: Receiver?
     @Published private(set) var permission = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     @Published private(set) var working = false
+    @Published private(set) var sendingManually = false
     @Published private(set) var sentCount = 0
     @Published private(set) var lastSent: Date?
     @Published private(set) var errorMessage: String?
@@ -173,8 +214,7 @@ final class PhotoSync: ObservableObject {
     private let observer = LibraryObserver()
     private var observingLibrary = false
     private var history: SyncHistory?
-    private var sessionStart: Date?
-    private var startedForegroundSession = false
+    private var changingReceiver = false
     private var active = false
     private var scanAgain = false
     private var runningScan: Task<Bool, Never>?
@@ -183,10 +223,9 @@ final class PhotoSync: ObservableObject {
     private var retryDelay = 15
 
     var canReadPhotos: Bool { permission == .authorized || permission == .limited }
-    var acceptsBackgroundRefresh: Bool { receiver?.automatic == true && canReadPhotos && sessionStart != nil }
+    var acceptsBackgroundRefresh: Bool { receiver?.automatic == true && canReadPhotos && receiver?.pairedAt != nil }
 
     private init() {
-        sessionStart = UserDefaults.standard.object(forKey: Self.sessionStartKey) as? Date
         observer.sync = self
         reloadReceiver()
     }
@@ -214,30 +253,57 @@ final class PhotoSync: ObservableObject {
     }
 
     func connect(_ candidate: Receiver) async throws {
-        guard !working else { throw SyncIssue.syncBusy }
+        guard !changingReceiver, !sendingManually else { throw SyncIssue.syncBusy }
+        changingReceiver = true
+        defer {
+            changingReceiver = false
+            libraryChanged()
+        }
+
         try await ReceiverClient.check(candidate)
         try Task.checkCancellation()
-        guard !working else { throw SyncIssue.syncBusy }
-        let history = try SyncHistory(key: candidate.historyKey)
-        try ReceiverStore.save(candidate)
-        receiver = candidate
+        let connectedAt = Date.now
+        await haltAutomaticWork()
+        try Task.checkCancellation()
+
+        var verified = candidate
+        if let receiver, receiver.code == candidate.code {
+            verified.pairedAt = receiver.pairedAt ?? connectedAt
+            verified.automatic = receiver.automatic
+        } else {
+            verified.pairedAt = connectedAt
+        }
+        let history = try SyncHistory(key: verified.historyKey)
+        try ReceiverStore.save(verified)
+        receiver = verified
         self.history = history
         errorMessage = nil
         updateStats()
-        if candidate.automatic { libraryChanged() }
+    }
+
+    func disconnect() async throws {
+        guard !changingReceiver, !sendingManually else { throw SyncIssue.syncBusy }
+        changingReceiver = true
+        defer {
+            changingReceiver = false
+            libraryChanged()
+        }
+        await haltAutomaticWork()
+        try ReceiverStore.clear()
+        BGRefresh.cancel()
+        receiver = nil
+        history = nil
+        errorMessage = nil
+        updateStats()
     }
 
     func setAutomatic(_ enabled: Bool) {
-        guard var receiver else { return }
+        guard !changingReceiver, var receiver else { return }
         receiver.automatic = enabled
         if !enabled {
             self.receiver = receiver
-            scanAgain = false
-            pendingScan?.cancel()
-            pendingScan = nil
-            resetRetry()
             BGRefresh.cancel()
-            runningScan?.cancel()
+            cancelAutomaticWork()
         }
         do {
             try ReceiverStore.save(receiver)
@@ -260,13 +326,6 @@ final class PhotoSync: ObservableObject {
         active = phase == .active
         updatePhotoAccess(PHPhotoLibrary.authorizationStatus(for: .readWrite))
         if active {
-            if !startedForegroundSession {
-                startedForegroundSession = true
-                let start = Date.now
-                sessionStart = start
-                UserDefaults.standard.set(start, forKey: Self.sessionStartKey)
-                runningScan?.cancel()
-            }
             resetRetry()
             if history == nil { reloadReceiver() }
             libraryChanged()
@@ -279,7 +338,8 @@ final class PhotoSync: ObservableObject {
     }
 
     fileprivate func libraryChanged() {
-        guard active, receiver?.automatic == true, canReadPhotos else { return }
+        guard active, !changingReceiver, !sendingManually, let receiver,
+              receiver.pairedAt == nil || (receiver.automatic && canReadPhotos) else { return }
         pendingScan?.cancel()
         pendingScan = Task {
             do {
@@ -293,11 +353,11 @@ final class PhotoSync: ObservableObject {
     }
 
     @discardableResult
-    func scan(manual: Bool = false, background: Bool = false) async -> Bool {
+    func scan(background: Bool = false) async -> Bool {
         guard !Task.isCancelled else { return false }
         updatePhotoAccess(PHPhotoLibrary.authorizationStatus(for: .readWrite))
-        guard let receiver, receiver.automatic || manual, canReadPhotos,
-              let history, let sessionStart else { return true }
+        guard !changingReceiver, !sendingManually, let receiver, history != nil,
+              receiver.pairedAt == nil || (receiver.automatic && canReadPhotos) else { return true }
         guard runningScan == nil else {
             if !background { scanAgain = true }
             return true
@@ -314,7 +374,7 @@ final class PhotoSync: ObservableObject {
         }
 
         let operation = Task {
-            await runScan(receiver: receiver, initialHistory: history, sessionStart: sessionStart, background: background)
+            await runAutomatic(receiver, background: background)
         }
         runningScan = operation
         return await withTaskCancellationHandler {
@@ -324,16 +384,144 @@ final class PhotoSync: ObservableObject {
         }
     }
 
-    private func runScan(receiver: Receiver, initialHistory: SyncHistory, sessionStart: Date, background: Bool) async -> Bool {
+    func sendSelection(
+        _ items: [PhotosPickerItem], to destination: Receiver, onProgress: (Int) -> Void
+    ) async -> ManualResult {
+        guard let receiver, receiver.code == destination.code, receiver.displayAddress == destination.displayAddress,
+              destination.pairedAt == nil || destination.pairedAt == receiver.pairedAt else {
+            return ManualResult(remaining: items, message: SyncIssue.receiverChanged.localizedDescription)
+        }
+        guard !changingReceiver, !sendingManually else {
+            return ManualResult(remaining: items, message: SyncIssue.syncBusy.localizedDescription)
+        }
+        guard history != nil else {
+            return ManualResult(remaining: items, message: SyncIssue.storage.localizedDescription)
+        }
+        sendingManually = true
+        defer {
+            sendingManually = false
+            libraryChanged()
+        }
+        await haltAutomaticWork()
+
+        var result = ManualResult(remaining: [])
+        let verified: Receiver
+        do {
+            try Task.checkCancellation()
+            // A migrated pairing must be verified before any transfer can establish its cutoff.
+            verified = try await verifyLegacyPairing(self.receiver ?? receiver)
+        } catch {
+            return ManualResult(remaining: items, message: Self.manualErrorMessage(error))
+        }
+
+        for (index, item) in items.enumerated() {
+            do {
+                try Task.checkCancellation()
+                let assetID = item.itemIdentifier.map(Self.uploadID)
+                if let assetID, history?.sent.contains(assetID) == true {
+                    result.alreadySent += 1
+                } else {
+                    guard let image = try await item.loadTransferable(type: ScreenshotData.self) else {
+                        throw SyncIssue.unavailableImage
+                    }
+                    let id = assetID ?? "ios-\(digest(image.bytes))"
+                    if history?.sent.contains(id) == true {
+                        result.alreadySent += 1
+                    } else {
+                        try await upload(image, id: id, timestamp: .now, to: verified)
+                        result.sent += 1
+                    }
+                }
+            } catch {
+                if Task.isCancelled || error is URLError || Self.isServerFailure(error) || Self.isPairingFailure(error) {
+                    result.remaining.append(contentsOf: items[index...])
+                    result.message = Self.manualErrorMessage(error)
+                    break
+                }
+                result.remaining.append(item)
+                if result.message == nil { result.message = error.localizedDescription }
+            }
+            onProgress(index + 1)
+        }
+        return result
+    }
+
+    private func verifyLegacyPairing(_ current: Receiver) async throws -> Receiver {
+        if current.pairedAt != nil { return current }
+        try await ReceiverClient.check(current)
+        try Task.checkCancellation()
+        guard receiver == current else { throw SyncIssue.receiverChanged }
+        var verified = current
+        verified.pairedAt = .now
+        try ReceiverStore.save(verified)
+        receiver = verified
+        return verified
+    }
+
+    private func cancelAutomaticWork() {
+        scanAgain = false
+        pendingScan?.cancel()
+        pendingScan = nil
+        resetRetry()
+        runningScan?.cancel()
+    }
+
+    private func haltAutomaticWork() async {
+        let operation = runningScan
+        cancelAutomaticWork()
+        _ = await operation?.value
+    }
+
+    private func upload(_ image: ScreenshotData, id: String, timestamp: Date, to receiver: Receiver) async throws {
+        try Task.checkCancellation()
+        let timestamp = Self.filenameFormatter.string(from: timestamp)
+        let filename = "iOS-\(timestamp)-\(id.suffix(8)).\(image.fileExtension)"
+        try await ReceiverClient.send(image, named: filename, id: id, to: receiver)
+        guard self.receiver?.code == receiver.code, var history else { throw SyncIssue.receiverChanged }
+        try history.markSent(id)
+        self.history = history
+        updateStats()
+    }
+
+    private static func uploadID(_ identifier: String) -> String { "ios-\(digest(identifier))" }
+
+    private static func isServerFailure(_ error: Error) -> Bool {
+        if case .httpStatus(let status) = error as? SyncIssue { return status >= 500 }
+        return false
+    }
+
+    private static func isPairingFailure(_ error: Error) -> Bool {
+        switch error as? SyncIssue {
+        case .accessDenied, .receiverChanged, .storage: true
+        default: false
+        }
+    }
+
+    private static func manualErrorMessage(_ error: Error) -> String {
+        if Task.isCancelled { return "已停止发送。" }
+        return error is URLError ? connectionError : error.localizedDescription
+    }
+
+    private func runAutomatic(_ receiver: Receiver, background: Bool) async -> Bool {
         guard !Task.isCancelled else { return false }
-        var history = initialHistory
+        let verified: Receiver
+        do {
+            verified = try await verifyLegacyPairing(receiver)
+        } catch {
+            guard !Task.isCancelled else { return false }
+            errorMessage = error is URLError ? Self.connectionError : error.localizedDescription
+            if error is URLError || Self.isServerFailure(error) { scheduleRetry() }
+            return false
+        }
+        guard verified.automatic, canReadPhotos, let pairedAt = verified.pairedAt else { return true }
+
         let screenshotPredicate = NSPredicate(
             format: "(mediaSubtypes & %d) != 0", Int(PHAssetMediaSubtype.photoScreenshot.rawValue)
         )
         let options = PHFetchOptions()
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         options.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
-            screenshotPredicate, NSPredicate(format: "creationDate >= %@", sessionStart as NSDate),
+            screenshotPredicate, NSPredicate(format: "creationDate > %@", pairedAt as NSDate),
         ])
         let assets = PHAsset.fetchAssets(with: .image, options: options)
 
@@ -344,19 +532,14 @@ final class PhotoSync: ObservableObject {
             if Task.isCancelled { return false }
             if background && (attempts >= 5 || ContinuousClock.now >= deadline) { break }
             let asset = assets.object(at: index)
-            let id = "ios-\(digest(asset.localIdentifier))"
-            guard !history.sent.contains(id) else { continue }
+            guard let capturedAt = asset.creationDate, capturedAt > pairedAt else { continue }
+            let id = Self.uploadID(asset.localIdentifier)
+            guard history?.sent.contains(id) == false else { continue }
             attempts += 1
 
             do {
                 let image = try await ScreenshotData.load(asset)
-                try Task.checkCancellation()
-                let timestamp = Self.filenameFormatter.string(from: asset.creationDate ?? .now)
-                let filename = "iOS-\(timestamp)-\(id.suffix(8)).\(image.fileExtension)"
-                try await ReceiverClient.send(image, named: filename, id: id, to: receiver)
-                try history.markSent(id)
-                self.history = history
-                updateStats()
+                try await upload(image, id: id, timestamp: capturedAt, to: verified)
             } catch let issue as SyncIssue {
                 if Task.isCancelled { return false }
                 errorMessage = issue.localizedDescription
@@ -389,7 +572,8 @@ final class PhotoSync: ObservableObject {
     }
 
     private func scheduleRetry() {
-        guard retryEvent == nil, active, receiver?.automatic == true else { return }
+        guard retryEvent == nil, active, !changingReceiver, !sendingManually, let receiver,
+              receiver.pairedAt == nil || receiver.automatic else { return }
         let seconds = retryDelay
         retryDelay = min(retryDelay * 2, 300)
         retryEvent = Task {

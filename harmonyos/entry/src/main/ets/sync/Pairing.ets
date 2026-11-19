@@ -3,13 +3,11 @@ import { util } from '@kit.ArkTS';
 import { fileIo } from '@kit.CoreFileKit';
 import { isLocalAddress, isPairingCode } from './Protocol';
 
-export const SYNC_SESSION_START: string = 'syncSessionStartedMs';
-
 export class Pairing {
   constructor(
     public host: string,
     public token: string,
-    public sessionStartedMs: number | undefined,
+    public pairedAfterMs: number | undefined,
     public installation: string,
     public destination: string,
     public enabled: boolean,
@@ -32,8 +30,8 @@ export function loadPairing(context: common.Context): Pairing | undefined {
     typeof value.token !== 'string' || !isPairingCode(value.token) ||
     typeof value.installation !== 'string' || !/^[a-f0-9]{32}$/.test(value.installation) ||
     typeof value.destination !== 'string' || !/^[a-f0-9]{32}$/.test(value.destination) ||
-    (value.sessionStartedMs !== undefined &&
-      (!Number.isSafeInteger(value.sessionStartedMs) || value.sessionStartedMs <= 0)) ||
+    (value.pairedAfterMs !== undefined &&
+      (!Number.isSafeInteger(value.pairedAfterMs) || value.pairedAfterMs <= 0)) ||
     typeof value.enabled !== 'boolean' ||
     !Number.isSafeInteger(value.revision) || value.revision < 0) {
     throw new Error('本机配对设置无法读取');
@@ -46,35 +44,43 @@ function randomID(): string {
 }
 
 export function createPairing(
-  host: string, token: string, sessionStartedMs: number, previous?: Pairing
+  context: common.Context, host: string, token: string, verifiedAt: number, previous?: Pairing
 ): Pairing {
   const sameDestination: boolean = previous !== undefined && previous.token === token;
-  return new Pairing(host, token, sessionStartedMs,
-    previous ? previous.installation : randomID(),
+  const installationPath: string = pathFor(context) + '.installation';
+  const knownInstallation: string | undefined = previous?.installation ??
+    (fileIo.accessSync(installationPath) ? fileIo.readTextSync(installationPath) : undefined);
+  const installation: string = knownInstallation && /^[a-f0-9]{32}$/.test(knownInstallation) ?
+    knownInstallation : randomID();
+  // Older versions stored the most recent app launch time. Only carry forward an authenticated cutoff.
+  return new Pairing(host, token, (sameDestination ? previous?.pairedAfterMs : undefined) ?? verifiedAt, installation,
     sameDestination && previous ? previous.destination : randomID(),
-    previous?.enabled ?? true, (previous?.revision ?? 0) + 1);
+    previous?.enabled ?? true, (previous?.revision ?? verifiedAt) + 1);
 }
 
 export function withSyncEnabled(pairing: Pairing, enabled: boolean): Pairing {
-  return new Pairing(pairing.host, pairing.token, pairing.sessionStartedMs, pairing.installation, pairing.destination,
+  return new Pairing(pairing.host, pairing.token, pairing.pairedAfterMs, pairing.installation, pairing.destination,
     enabled, pairing.revision + 1);
 }
 
-export function startSyncSession(context: common.Context, startedMs: number): void {
+export function clearPairing(context: common.Context): void {
   const pairing: Pairing | undefined = loadPairing(context);
   if (pairing) {
-    savePairing(context, new Pairing(pairing.host, pairing.token, startedMs, pairing.installation, pairing.destination,
-      pairing.enabled, pairing.revision + 1));
+    const path: string = pathFor(context);
+    replaceFile(path + '.installation', pairing.installation);
+    fileIo.unlinkSync(path);
   }
 }
 
 export function savePairing(context: common.Context, value: Pairing): void {
-  const path: string = pathFor(context);
+  replaceFile(pathFor(context), JSON.stringify(value));
+}
+
+function replaceFile(path: string, data: string): void {
   const temporaryPath: string = path + '.tmp';
   const file: fileIo.File = fileIo.openSync(temporaryPath,
     fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC | fileIo.OpenMode.WRITE_ONLY);
   try {
-    const data: string = JSON.stringify(value);
     if (fileIo.writeSync(file.fd, data) !== data.length) {
       throw new Error('保存配对设置失败');
     }

@@ -31,11 +31,10 @@ final class ScreenshotCatalog {
     record Screenshot(Uri uri, String id, String filename, String type, long size) {}
 
     static Cursor query(ContentResolver resolver, SyncSettings.Pairing pairing, CancellationSignal cancellation) {
-        long sinceSeconds = pairing.launchStartedAt() / 1000;
-        String filter = MediaStore.Images.Media.IS_PENDING + " = 0 AND " + DATE + " >= ?";
+        String filter = MediaStore.Images.Media.IS_PENDING + " = 0 AND " + DATE_TAKEN + " > ?";
         return resolver.query(IMAGES, PROJECTION, filter,
-            new String[] { Long.toString(sinceSeconds) },
-            DATE + " ASC, " + ID + " ASC", cancellation);
+            new String[] { Long.toString(pairing.connectedAt()) },
+            DATE_TAKEN + " ASC, " + ID + " ASC", cancellation);
     }
 
     static Screenshot read(Cursor cursor, SyncSettings.Pairing pairing) {
@@ -50,7 +49,7 @@ final class ScreenshotCatalog {
         if (!looksLikeScreenshot(path, name)) {
             return null;
         }
-        if (takenMillis > 0 ? takenMillis < pairing.launchStartedAt() : addedSeconds <= pairing.launchStartedAt() / 1000) {
+        if (takenMillis <= pairing.connectedAt()) {
             return null;
         }
 
@@ -64,7 +63,7 @@ final class ScreenshotCatalog {
         return new Screenshot(uri, id, filename(name, row, addedSeconds, extension), type, size);
     }
 
-    private static String extension(String type) {
+    static String extension(String type) {
         return switch (type == null ? "" : type) {
             case "image/png" -> ".png";
             case "image/jpeg" -> ".jpg";
@@ -72,6 +71,8 @@ final class ScreenshotCatalog {
             case "image/heic" -> ".heic";
             case "image/heif" -> ".heif";
             case "image/gif" -> ".gif";
+            case "image/tiff" -> ".tiff";
+            case "image/bmp" -> ".bmp";
             default -> "";
         };
     }
@@ -92,7 +93,7 @@ final class ScreenshotCatalog {
             || lower.startsWith("screenshot ") || lower.startsWith("screen_shot_");
     }
 
-    private static String filename(String name, long row, long addedSeconds, String extension) {
+    static String filename(String name, long row, long addedSeconds, String extension) {
         String stem = name == null ? "" : name.replaceFirst("\\.[^.]+$", "");
         stem = stem.replaceAll("[^A-Za-z0-9._-]+", "-").replaceAll("^[._-]+|[._-]+$", "");
         if (stem.isEmpty()) {

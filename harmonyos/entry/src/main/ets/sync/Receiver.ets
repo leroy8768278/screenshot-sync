@@ -32,10 +32,11 @@ export class Receiver {
     }
   }
 
-  async upload(id: string, filename: string, format: ImageFormat, image: ArrayBuffer): Promise<boolean> {
+  async upload(id: string, deviceId: string, filename: string, format: ImageFormat, image: ArrayBuffer): Promise<boolean> {
     const request = new rcp.Request(this.baseURL + '/v1/screenshots', 'POST', {
       'Authorization': this.authorization,
       'X-Screenshot-ID': id,
+      'X-Device-ID': deviceId,
       'X-Filename': filename,
       'Content-Type': format.mimeType,
       'Content-Length': String(image.byteLength)

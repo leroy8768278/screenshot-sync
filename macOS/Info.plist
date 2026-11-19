@@ -3,21 +3,23 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleDevelopmentRegion</key>
-    <string>zh_CN</string>
+    <string>zh-Hans</string>
     <key>CFBundleDisplayName</key>
-    <string>截图同步</string>
+    <string>即图</string>
     <key>CFBundleExecutable</key>
     <string>ScreenshotSyncMac</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon.icns</string>
     <key>CFBundleIdentifier</key>
     <string>local.screenshotsync.mac</string>
     <key>CFBundleName</key>
-    <string>截图同步</string>
+    <string>即图</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.2.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>

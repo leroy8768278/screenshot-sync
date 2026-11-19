@@ -10,7 +10,7 @@ export default class ScreenshotSyncWork extends WorkSchedulerExtensionAbility {
   onWorkStart(work: workScheduler.WorkInfo): void {
     try {
       const pairing: Pairing | undefined = loadPairing(this.context);
-      if (!pairing?.enabled || pairing.sessionStartedMs === undefined ||
+      if (!pairing?.enabled || pairing.pairedAfterMs === undefined ||
         work.workId !== scheduledWorkId(pairing.revision)) {
         workScheduler.stopWork(work, true);
         return;
