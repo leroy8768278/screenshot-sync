@@ -1,11 +1,13 @@
 package local.snapsync.android;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.database.ContentObserver;
 import android.graphics.Color;
@@ -38,9 +40,13 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import com.google.zxing.client.android.Intents;
+import com.journeyapps.barcodescanner.ScanOptions;
+
 import java.io.IOException;
 import java.text.DateFormat;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -50,7 +56,9 @@ import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
     private static final int REQUEST_PHOTOS = 1;
-    private static final int PICK_IMAGES = 2;
+    private static final int PICK_MEDIA = 2;
+    private static final int REQUEST_NOTIFICATIONS = 3;
+    private static final int SCAN_PAIRING = 4;
     private static final int BACKGROUND = 0xfff3f6fb;
     private static final int INK = 0xff172641;
     private static final int MUTED = 0xff52617a;
@@ -65,17 +73,22 @@ public final class MainActivity extends Activity {
     private final ExecutorService connectionExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService manualExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService previewExecutor = Executors.newSingleThreadExecutor();
-    private final Runnable scanOnChange = () -> triggerForegroundSync();
+    private final Runnable scanOnChange = () -> SyncScheduler.sync(this, SyncSettings.read(this));
     private final ContentObserver photos = new ContentObserver(handler) {
         @Override
         public void onChange(boolean selfChange) {
             handler.removeCallbacks(scanOnChange);
-            handler.postDelayed(scanOnChange, 600);
+            handler.postDelayed(scanOnChange, 100);
         }
     };
     private final SharedPreferences.OnSharedPreferenceChangeListener statusListener = (prefs, key) -> {
         if (SyncSettings.STATUS.equals(key)) {
             showSavedStatus();
+        } else if (SyncSettings.LIVE_ENABLED.equals(key)) {
+            refreshSyncControls();
+            if (!SyncSettings.liveEnabled(this)) {
+                updateSyncMonitoring();
+            }
         }
     };
 
@@ -88,23 +101,27 @@ public final class MainActivity extends Activity {
     private TextView testStatus;
     private TextView syncStatus;
     private TextView permissionStatus;
+    private Button scanButton;
+    private Button switchMacButton;
     private Button connectButton;
     private Button connectionSettings;
     private Button disconnectButton;
     private Button requestPermissionButton;
     private Button openSettingsButton;
-    private Button chooseImagesButton;
+    private Button chooseMediaButton;
     private Button retryButton;
     private Button cancelSendButton;
     private Button syncControlButton;
+    private Button liveSyncButton;
     private TextView manualStatus;
     private boolean observerRegistered;
+    private boolean resumed;
     private boolean verifying;
     private boolean editingConnection;
     private boolean migrationAttempted;
     private String pickerSession = "";
     private String selectedSession = "";
-    private ArrayList<Uri> selectedImages = new ArrayList<>();
+    private ArrayList<Uri> selectedMedia = new ArrayList<>();
     private ManualSend manual;
 
     @Override
@@ -128,7 +145,7 @@ public final class MainActivity extends Activity {
                 ? savedInstanceState.getParcelableArrayList("selected_images", Uri.class)
                 : savedInstanceState.getParcelableArrayList("selected_images");
             if (restored != null && pairing.isVerified() && selectedSession.equals(sessionKey(pairing))) {
-                selectedImages = restored;
+                selectedMedia = restored;
             }
         }
         SyncScheduler.configure(this, pairing);
@@ -140,7 +157,7 @@ public final class MainActivity extends Activity {
         super.onSaveInstanceState(state);
         state.putString("picker_session", pickerSession);
         state.putString("selected_session", selectedSession);
-        state.putParcelableArrayList("selected_images", selectedImages);
+        state.putParcelableArrayList("selected_images", selectedMedia);
     }
 
     @Override
@@ -153,18 +170,20 @@ public final class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        resumed = true;
         refreshPermissions();
         SyncSettings.Pairing pairing = SyncSettings.read(this);
         SyncScheduler.configure(this, pairing);
         if (pairing.isConfigured() && !pairing.isVerified() && !migrationAttempted) {
             migrationAttempted = true;
-            verifyConnection(new Input(pairing.host(), pairing.code()));
+            verifyConnection(Collections.singletonList(pairing.host()), pairing.code());
         }
-        triggerForegroundSync();
+        updateSyncMonitoring();
     }
 
     @Override
     protected void onPause() {
+        resumed = false;
         handler.removeCallbacks(scanOnChange);
         updateObserver(false);
         super.onPause();
@@ -193,7 +212,9 @@ public final class MainActivity extends Activity {
         if (requestCode == REQUEST_PHOTOS) {
             refreshPermissions();
             SyncScheduler.configure(this, SyncSettings.read(this));
-            triggerForegroundSync();
+            updateSyncMonitoring();
+        } else if (requestCode == REQUEST_NOTIFICATIONS) {
+            updateSyncMonitoring();
         }
     }
 
@@ -226,20 +247,34 @@ public final class MainActivity extends Activity {
             Math.min(contentWidth, dp(580)), FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
         centered.addView(page, pageParams);
 
+        LinearLayout heading = row();
+        heading.setGravity(Gravity.START | Gravity.TOP);
         TextView title = label(R.string.app_name, 30, INK, true);
         title.setAccessibilityHeading(true);
-        add(page, title, 0);
+        heading.addView(title);
+        TextView version = label(0, 14, MUTED, false);
+        version.setText(getString(R.string.app_version, BuildConfig.VERSION_NAME));
+        version.setPaddingRelative(dp(8), 0, 0, 0);
+        heading.addView(version);
+        add(page, heading, 0);
         add(page, label(R.string.subtitle, 14, MUTED, false), 6);
         pairingPanel = pairingCard();
         syncPanel = statusCard();
-        add(page, syncPanel, 20);
-        add(page, pairingPanel, 12);
+        add(page, pairingPanel, 20);
+        add(page, syncPanel, 12);
         return scroll;
     }
 
     private LinearLayout pairingCard() {
         LinearLayout card = card(R.string.connect_title);
         add(card, label(R.string.connect_help, 13, MUTED, false), 8);
+        scanButton = button(R.string.scan_pairing, true);
+        scanButton.setOnClickListener(view -> scanPairingCode());
+        add(card, scanButton, 12);
+        testStatus = label(0, 13, MUTED, false);
+        testStatus.setVisibility(View.GONE);
+        testStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        add(card, testStatus, 10);
         TextView addressLabel = label(R.string.host, 13, INK, true);
         addressLabel.setLabelFor(HOST_ID);
         add(card, addressLabel, 16);
@@ -267,18 +302,14 @@ public final class MainActivity extends Activity {
         codeRow.addView(visibility, visibilityParams);
         add(card, codeRow, 6);
 
-        connectButton = button(R.string.connect_title, true);
+        connectButton = button(R.string.manual_pairing, false);
         connectButton.setOnClickListener(view -> {
             Input input = readInput();
             if (input != null) {
-                verifyConnection(input);
+                verifyConnection(Collections.singletonList(input.host()), input.code());
             }
         });
         add(card, connectButton, 12);
-        testStatus = label(0, 13, MUTED, false);
-        testStatus.setVisibility(View.GONE);
-        testStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-        add(card, testStatus, 10);
         disconnectButton = button(R.string.disconnect, false);
         disconnectButton.setOnClickListener(view -> confirmDisconnect());
         add(card, disconnectButton, 10);
@@ -290,6 +321,9 @@ public final class MainActivity extends Activity {
         LinearLayout destination = card(R.string.receiver);
         connectedReceiver = label(0, 14, INK, false);
         add(destination, connectedReceiver, 7);
+        switchMacButton = button(R.string.scan_switch_mac, false);
+        switchMacButton.setOnClickListener(view -> scanPairingCode());
+        add(destination, switchMacButton, 10);
         connectionSettings = button(R.string.connection_settings, false);
         connectionSettings.setOnClickListener(view -> {
             editingConnection = !editingConnection;
@@ -320,17 +354,20 @@ public final class MainActivity extends Activity {
         syncControlButton = button(R.string.stop_sync, false);
         syncControlButton.setOnClickListener(view -> toggleSyncPause());
         add(card, syncControlButton, 10);
+        liveSyncButton = button(R.string.live_start, false);
+        liveSyncButton.setOnClickListener(view -> toggleLiveSync());
+        add(card, liveSyncButton, 8);
         add(page, card, 12);
 
-        chooseImagesButton = button(R.string.pick_images, true);
-        chooseImagesButton.setOnClickListener(view -> openImagePicker());
-        add(page, chooseImagesButton, 12);
+        chooseMediaButton = button(R.string.pick_media, true);
+        chooseMediaButton.setOnClickListener(view -> openMediaPicker());
+        add(page, chooseMediaButton, 12);
         manualStatus = label(0, 13, MUTED, false);
         manualStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         manualStatus.setVisibility(View.GONE);
         add(page, manualStatus, 8);
         retryButton = button(R.string.manual_retry, false);
-        retryButton.setOnClickListener(view -> confirmImages());
+        retryButton.setOnClickListener(view -> confirmMedia());
         add(page, retryButton, 8);
         cancelSendButton = button(R.string.manual_cancel, false);
         cancelSendButton.setOnClickListener(view -> {
@@ -363,7 +400,42 @@ public final class MainActivity extends Activity {
         return new Input(host, code);
     }
 
-    private void verifyConnection(Input input) {
+    private void scanPairingCode() {
+        Intent capture = new ScanOptions()
+            .setCaptureActivity(PairingScanActivity.class)
+            .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+            .setPrompt(getString(R.string.scan_prompt))
+            .setOrientationLocked(false)
+            .setBeepEnabled(false)
+            .addExtra(Intents.Scan.SHOW_MISSING_CAMERA_PERMISSION_DIALOG, false)
+            .createScanIntent(this);
+        startActivityForResult(capture, SCAN_PAIRING);
+    }
+
+    private void handlePairingScan(int result, Intent data) {
+        if (data == null) {
+            return;
+        }
+        if (result != RESULT_OK && !data.getBooleanExtra(Intents.Scan.MISSING_CAMERA_PERMISSION, false)) {
+            return;
+        }
+        editingConnection = true;
+        refreshSyncControls();
+        pairingPanel.post(() -> pairingPanel.requestRectangleOnScreen(
+            new Rect(0, 0, pairingPanel.getWidth(), dp(200)), false));
+        if (result != RESULT_OK) {
+            showTestResult(R.string.scan_permission, true);
+            return;
+        }
+        try {
+            PairingCode pairing = PairingCode.parse(data.getStringExtra(Intents.Scan.RESULT));
+            verifyConnection(pairing.hosts(), pairing.token());
+        } catch (IOException invalid) {
+            showTestResult(R.string.scan_invalid, true);
+        }
+    }
+
+    private void verifyConnection(List<String> hosts, String code) {
         if (verifying) {
             return;
         }
@@ -371,21 +443,32 @@ public final class MainActivity extends Activity {
         refreshSyncControls();
         showTestResult(R.string.status_testing, false);
         connectionExecutor.execute(() -> {
-            int response;
-            try (ReceiverConnection receiver = new ReceiverConnection(getApplicationContext(), input.host(), input.code())) {
-                response = receiver.test();
-            } catch (IOException failure) {
-                response = 0;
+            String verifiedHost = null;
+            int response = 0;
+            for (String host : hosts) {
+                if (Thread.currentThread().isInterrupted()) {
+                    return;
+                }
+                try (ReceiverConnection receiver = new ReceiverConnection(getApplicationContext(), host, code)) {
+                    response = receiver.test();
+                    if (response == 200) {
+                        verifiedHost = host;
+                        break;
+                    }
+                } catch (IOException unavailable) {
+                    // Try the next network interface advertised by the same Mac.
+                }
             }
+            String destination = verifiedHost;
             int result = response;
             long verifiedAt = System.currentTimeMillis();
             runOnUiThread(() -> {
-                if (isDestroyed()) {
+                if (isFinishing() || isDestroyed()) {
                     return;
                 }
                 verifying = false;
                 switch (result) {
-                    case 200 -> saveVerified(input, verifiedAt);
+                    case 200 -> saveVerified(new Input(destination, code), verifiedAt);
                     case 401, 403 -> showTestResult(R.string.status_bad_code, true);
                     case 0 -> showTestResult(R.string.status_network, true);
                     default -> showTestResult(R.string.status_rejected, true, result);
@@ -406,6 +489,17 @@ public final class MainActivity extends Activity {
             manualStatus.setVisibility(View.GONE);
         }
 
+        connectionExecutor.execute(() -> {
+            if (!SyncSettings.isCurrent(this, pairing)) {
+                return;
+            }
+            try (ReceiverConnection receiver = new ReceiverConnection(this, pairing.host(), pairing.code())) {
+                receiver.reportDevice(pairing.deviceId());
+            } catch (IOException unavailable) {
+                // Media uploads also carry this profile if the receiver is unavailable now.
+            }
+        });
+
         showReceiverAddress(input.host());
         codeInput.setText(input.code());
         getSystemService(InputMethodManager.class).hideSoftInputFromWindow(hostInput.getWindowToken(), 0);
@@ -415,7 +509,7 @@ public final class MainActivity extends Activity {
         testStatus.setVisibility(View.GONE);
         SyncScheduler.configure(this, pairing);
         refreshPermissions();
-        triggerForegroundSync();
+        updateSyncMonitoring();
     }
 
     private void confirmDisconnect() {
@@ -437,6 +531,7 @@ public final class MainActivity extends Activity {
                 SyncScheduler.configure(this, SyncSettings.read(this));
                 showSavedStatus();
                 refreshPermissions();
+                updateSyncMonitoring();
             })
             .show();
     }
@@ -451,13 +546,34 @@ public final class MainActivity extends Activity {
         handler.removeCallbacks(scanOnChange);
         SyncScheduler.configure(this, SyncSettings.read(this));
         refreshPermissions();
-        if (!pause) {
-            triggerForegroundSync();
+        updateSyncMonitoring();
+    }
+
+    private void toggleLiveSync() {
+        if (SyncSettings.liveEnabled(this)) {
+            SyncSettings.setLiveEnabled(this, false);
+            return;
+        }
+        SyncSettings.setLiveEnabled(this, true);
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[] { Manifest.permission.POST_NOTIFICATIONS }, REQUEST_NOTIFICATIONS);
+        } else {
+            updateSyncMonitoring();
         }
     }
 
-    private void triggerForegroundSync() {
-        SyncScheduler.sync(this, SyncSettings.read(this));
+    private void updateSyncMonitoring() {
+        if (!resumed) {
+            return;
+        }
+        SyncSettings.Pairing pairing = SyncSettings.read(this);
+        boolean live = ScreenshotMonitor.start(this, pairing);
+        boolean fallback = !live && ScreenshotScan.canRun(this, pairing);
+        updateObserver(fallback);
+        if (fallback) {
+            SyncScheduler.sync(this, pairing);
+        }
     }
 
     private void refreshPermissions() {
@@ -470,7 +586,6 @@ public final class MainActivity extends Activity {
         requestPermissionButton.setVisibility(access == PhotoAccess.FULL ? View.GONE : View.VISIBLE);
         openSettingsButton.setVisibility(access == PhotoAccess.FULL ? View.GONE : View.VISIBLE);
         refreshSyncControls();
-        updateObserver(access == PhotoAccess.FULL && SyncSettings.read(this).canSync());
     }
 
     private void refreshSyncControls() {
@@ -480,16 +595,23 @@ public final class MainActivity extends Activity {
         syncPanel.setVisibility(connected ? View.VISIBLE : View.GONE);
         pairingPanel.setVisibility(connected && !editingConnection ? View.GONE : View.VISIBLE);
         boolean sending = manual != null;
+        scanButton.setEnabled(!verifying && !sending);
+        switchMacButton.setVisibility(editingConnection ? View.GONE : View.VISIBLE);
+        switchMacButton.setEnabled(!verifying && !sending);
         connectButton.setEnabled(!verifying && !sending);
         disconnectButton.setVisibility(configured ? View.VISIBLE : View.GONE);
         disconnectButton.setEnabled(!verifying && !sending);
         connectionSettings.setEnabled(!sending && !verifying);
-        chooseImagesButton.setEnabled(connected && !sending && !verifying);
-        retryButton.setVisibility(!selectedImages.isEmpty() && !sending ? View.VISIBLE : View.GONE);
+        chooseMediaButton.setEnabled(connected && !sending && !verifying);
+        retryButton.setVisibility(!selectedMedia.isEmpty() && !sending ? View.VISIBLE : View.GONE);
         retryButton.setEnabled(connected && !verifying);
         cancelSendButton.setVisibility(sending ? View.VISIBLE : View.GONE);
         syncControlButton.setEnabled(!verifying);
         syncControlButton.setText(pairing.paused() ? R.string.resume_sync : R.string.stop_sync);
+        PhotoAccess access = PhotoAccess.current(this);
+        boolean live = SyncSettings.liveEnabled(this);
+        liveSyncButton.setText(live ? R.string.live_stop : R.string.live_start);
+        liveSyncButton.setEnabled(!verifying && (live || !pairing.paused() && access == PhotoAccess.FULL));
         if (!connected) {
             return;
         }
@@ -498,11 +620,11 @@ public final class MainActivity extends Activity {
             .format(new Date(pairing.connectedAt()));
         connectedReceiver.setText(getString(R.string.connection_summary, pairing.host(), SyncSettings.PORT, timestamp));
         syncMode.setText(pairing.paused() ? R.string.automatic_paused
-            : PhotoAccess.current(this) == PhotoAccess.FULL ? R.string.automatic_running : R.string.automatic_needs_permission);
+            : access == PhotoAccess.FULL ? R.string.automatic_running : R.string.automatic_needs_permission);
     }
 
     @SuppressWarnings("deprecation")
-    private void openImagePicker() {
+    private void openMediaPicker() {
         SyncSettings.Pairing pairing = SyncSettings.read(this);
         if (!pairing.isVerified()) {
             return;
@@ -510,10 +632,9 @@ public final class MainActivity extends Activity {
         pickerSession = sessionKey(pairing);
         if (Build.VERSION.SDK_INT >= 33) {
             Intent photoPicker = new Intent(MediaStore.ACTION_PICK_IMAGES)
-                .setType("image/*")
                 .putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, MediaStore.getPickImagesMaxLimit());
             try {
-                startActivityForResult(photoPicker, PICK_IMAGES);
+                startActivityForResult(photoPicker, PICK_MEDIA);
                 return;
             } catch (ActivityNotFoundException unavailable) {
                 // Some devices provide the document picker only.
@@ -521,10 +642,11 @@ public final class MainActivity extends Activity {
         }
         Intent documents = new Intent(Intent.ACTION_OPEN_DOCUMENT)
             .addCategory(Intent.CATEGORY_OPENABLE)
-            .setType("image/*")
+            .setType("*/*")
+            .putExtra(Intent.EXTRA_MIME_TYPES, new String[] {"image/*", "video/*"})
             .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         try {
-            startActivityForResult(documents, PICK_IMAGES);
+            startActivityForResult(documents, PICK_MEDIA);
         } catch (ActivityNotFoundException unavailable) {
             pickerSession = "";
             showManualStatus(getString(R.string.manual_picker_missing));
@@ -534,7 +656,11 @@ public final class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (request != PICK_IMAGES) {
+        if (request == SCAN_PAIRING) {
+            handlePairingScan(result, data);
+            return;
+        }
+        if (request != PICK_MEDIA) {
             return;
         }
         String session = pickerSession;
@@ -543,55 +669,81 @@ public final class MainActivity extends Activity {
         if (result != RESULT_OK || data == null || !pairing.isVerified() || !session.equals(sessionKey(pairing))) {
             return;
         }
-        LinkedHashSet<Uri> images = new LinkedHashSet<>();
-        addSelectedUri(images, data.getData());
+        LinkedHashSet<Uri> media = new LinkedHashSet<>();
+        addSelectedUri(media, data.getData());
         ClipData clip = data.getClipData();
         if (clip != null) {
             for (int i = 0; i < clip.getItemCount(); i++) {
-                addSelectedUri(images, clip.getItemAt(i).getUri());
+                addSelectedUri(media, clip.getItemAt(i).getUri());
             }
         }
-        if (images.isEmpty()) {
+        if (media.isEmpty()) {
             return;
         }
         selectedSession = session;
-        selectedImages = new ArrayList<>(images);
-        confirmImages();
+        selectedMedia = new ArrayList<>(media);
+        confirmMedia();
     }
 
-    private static void addSelectedUri(LinkedHashSet<Uri> images, Uri uri) {
+    private static void addSelectedUri(LinkedHashSet<Uri> media, Uri uri) {
         if (uri != null && "content".equals(uri.getScheme())) {
-            images.add(uri);
+            media.add(uri);
         }
     }
 
-    private void confirmImages() {
+    private void confirmMedia() {
         SyncSettings.Pairing pairing = SyncSettings.read(this);
-        if (selectedImages.isEmpty() || !pairing.isVerified() || !selectedSession.equals(sessionKey(pairing))) {
+        if (selectedMedia.isEmpty() || !pairing.isVerified() || !selectedSession.equals(sessionKey(pairing))) {
             return;
         }
-        List<Uri> selection = new ArrayList<>(selectedImages);
+        List<Uri> selection = new ArrayList<>(selectedMedia);
         LinearLayout previewContent = column();
         previewContent.setPadding(dp(20), dp(8), dp(20), dp(8));
         TextView message = label(0, 14, INK, false);
         message.setText(getString(R.string.manual_confirm_receiver, pairing.host(), SyncSettings.PORT, selection.size()));
         add(previewContent, message, 0);
         HorizontalScrollView thumbnails = new HorizontalScrollView(this);
-        LinearLayout images = row();
-        thumbnails.addView(images);
+        LinearLayout previews = row();
+        thumbnails.addView(previews);
         add(previewContent, thumbnails, 10);
         CancellationSignal cancellation = new CancellationSignal();
         for (Uri uri : selection.subList(0, Math.min(selection.size(), 6))) {
+            FrameLayout preview = new FrameLayout(this);
+            preview.setBackground(shape(FIELD, BORDER, 8));
+            preview.setClipToOutline(true);
             ImageView thumbnail = new ImageView(this);
-            thumbnail.setBackground(shape(FIELD, BORDER, 8));
             thumbnail.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            preview.addView(thumbnail, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+            TextView videoBadge = label(R.string.manual_video, 10, Color.WHITE, true);
+            videoBadge.setVisibility(View.GONE);
+            videoBadge.setPadding(dp(5), dp(1), dp(5), dp(1));
+            videoBadge.setBackground(shape(INK, INK, 4));
+            FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.END);
+            badgeParams.setMarginEnd(dp(3));
+            badgeParams.bottomMargin = dp(3);
+            preview.addView(videoBadge, badgeParams);
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(62), dp(62));
             params.setMarginEnd(dp(8));
-            images.addView(thumbnail, params);
+            previews.addView(preview, params);
             previewExecutor.execute(() -> {
                 try {
-                    var bitmap = getContentResolver().loadThumbnail(uri, new Size(dp(62), dp(62)), cancellation);
-                    runOnUiThread(() -> thumbnail.setImageBitmap(bitmap));
+                    var resolver = getContentResolver();
+                    String type = resolver.getType(uri);
+                    if (type != null && type.startsWith("video/")) {
+                        runOnUiThread(() -> {
+                            if (!cancellation.isCanceled()) {
+                                videoBadge.setVisibility(View.VISIBLE);
+                            }
+                        });
+                    }
+                    var bitmap = resolver.loadThumbnail(uri, new Size(dp(62), dp(62)), cancellation);
+                    runOnUiThread(() -> {
+                        if (!cancellation.isCanceled()) {
+                            thumbnail.setImageBitmap(bitmap);
+                        }
+                    });
                 } catch (IOException | RuntimeException unavailable) {
                     // Some document providers cannot provide previews. The item remains selected.
                 }
@@ -636,8 +788,8 @@ public final class MainActivity extends Activity {
             return;
         }
         manual = null;
-        selectedImages = new ArrayList<>(result.pending());
-        String summary = getString(R.string.manual_result, result.sent(), result.alreadySynced(), selectedImages.size());
+        selectedMedia = new ArrayList<>(result.pending());
+        String summary = getString(R.string.manual_result, result.sent(), result.alreadySynced(), selectedMedia.size());
         if (result.error() != 0) {
             summary += "\n" + getString(result.error(), result.response());
         }
@@ -651,7 +803,7 @@ public final class MainActivity extends Activity {
     }
 
     private void clearSelection() {
-        selectedImages.clear();
+        selectedMedia.clear();
         selectedSession = "";
     }
 

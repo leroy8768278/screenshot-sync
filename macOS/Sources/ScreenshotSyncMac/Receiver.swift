@@ -7,15 +7,18 @@ final class Receiver: @unchecked Sendable {
     private let listener: NWListener
     private var folder: URL
     private var token: String
+    private let onDeviceInfo: @Sendable (ScreenshotDevice, DeviceProfile, _ createdFile: Bool) -> Void
     private let onState: @Sendable (NWListener.State) -> Void
-    private let onReceive: @Sendable () -> Void
+    private let onReceive: @Sendable (ScreenshotDevice?) -> Void
     private var connections: [UUID: UploadConnection] = [:]
 
     init(folder: URL, token: String,
+         onDeviceInfo: @escaping @Sendable (ScreenshotDevice, DeviceProfile, _ createdFile: Bool) -> Void = { _, _, _ in },
          onState: @escaping @Sendable (NWListener.State) -> Void,
-         onReceive: @escaping @Sendable () -> Void) throws {
+         onReceive: @escaping @Sendable (ScreenshotDevice?) -> Void) throws {
         self.folder = folder
         self.token = token
+        self.onDeviceInfo = onDeviceInfo
         self.onState = onState
         self.onReceive = onReceive
         listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: Self.port)!)
@@ -30,7 +33,7 @@ final class Receiver: @unchecked Sendable {
             }
             let id = UUID()
             let upload = UploadConnection(connection: connection, queue: queue, folder: folder, token: token,
-                                          onReceive: onReceive) { [weak self] in
+                                          onDeviceInfo: onDeviceInfo, onReceive: onReceive) { [weak self] in
                 self?.connections.removeValue(forKey: id)
             }
             connections[id] = upload
@@ -62,17 +65,20 @@ final class Receiver: @unchecked Sendable {
 private final class UploadConnection: @unchecked Sendable {
     static let maxHeader = 16 * 1024
     static let maxBody = 64 * 1024 * 1024
+    static let maxVideoBody = 512 * 1024 * 1024
     private static let separator = Data("\r\n\r\n".utf8)
 
     private let connection: NWConnection
     private let queue: DispatchQueue
     private let folder: URL
     private let token: String
-    private let onReceive: @Sendable () -> Void
+    private let onDeviceInfo: @Sendable (ScreenshotDevice, DeviceProfile, _ createdFile: Bool) -> Void
+    private let onReceive: @Sendable (ScreenshotDevice?) -> Void
     private let onClose: @Sendable () -> Void
     private var timer: DispatchSourceTimer?
     private var header = Data()
     private var stage: Stage?
+    private var validationTask: Task<Void, Never>?
     private var responded = false
     private var closed = false
 
@@ -80,6 +86,8 @@ private final class UploadConnection: @unchecked Sendable {
         let file: StagedFile?
         let name: Inbox.FileName
         let device: ScreenshotDevice?
+        let profile: DeviceProfile?
+        let video: Inbox.Video?
         var remaining: Int
     }
 
@@ -89,11 +97,13 @@ private final class UploadConnection: @unchecked Sendable {
     }
 
     init(connection: NWConnection, queue: DispatchQueue, folder: URL, token: String,
-         onReceive: @escaping @Sendable () -> Void, onClose: @escaping @Sendable () -> Void) {
+         onDeviceInfo: @escaping @Sendable (ScreenshotDevice, DeviceProfile, _ createdFile: Bool) -> Void,
+         onReceive: @escaping @Sendable (ScreenshotDevice?) -> Void, onClose: @escaping @Sendable () -> Void) {
         self.connection = connection
         self.queue = queue
         self.folder = folder
         self.token = token
+        self.onDeviceInfo = onDeviceInfo
         self.onReceive = onReceive
         self.onClose = onClose
     }
@@ -113,7 +123,7 @@ private final class UploadConnection: @unchecked Sendable {
             [weak self] data, _, isComplete, error in
             guard let self, !closed, !responded else { return }
             if let data, !data.isEmpty { consume(data) }
-            guard !responded, !closed else { return }
+            guard !responded, !closed, validationTask == nil else { return }
             if isComplete || error != nil {
                 close()
             } else {
@@ -148,7 +158,7 @@ private final class UploadConnection: @unchecked Sendable {
             }
             return
         }
-        guard request.path == "/v1/screenshots" else {
+        guard request.path == "/v1/screenshots" || request.path == "/v1/devices" else {
             respond(404, "not_found")
             return
         }
@@ -166,17 +176,34 @@ private final class UploadConnection: @unchecked Sendable {
         }
         guard let length = request.headers["content-length"], !length.isEmpty,
               length.utf8.allSatisfy({ (48...57).contains($0) }),
-              let size = Int(length), size > 0 else {
+              let size = Int(length) else {
             respond(411, "content_length_required")
             return
         }
-        guard size <= Self.maxBody else {
-            respond(413, "image_too_large")
+        if request.path == "/v1/devices" {
+            guard size == 0, body.isEmpty,
+                  let platform = request.headers["x-device-platform"].flatMap(ScreenshotSource.init(rawValue:)),
+                  let device = request.device(for: platform), let profile = request.profile(for: device) else {
+                respond(400, "invalid_device_info")
+                return
+            }
+            onDeviceInfo(device, profile, false)
+            respond(200, "ok", key: "status")
             return
         }
-        guard let contentType = request.headers["content-type"],
-              contentType.lowercased().hasPrefix("image/") else {
-            respond(415, "image_required")
+        guard size > 0 else {
+            respond(411, "content_length_required")
+            return
+        }
+        let contentType = request.headers["content-type"]?.split(separator: ";", maxSplits: 1).first?
+            .trimmingCharacters(in: .whitespaces).lowercased() ?? ""
+        let video = Inbox.Video(contentType: contentType)
+        guard contentType.hasPrefix("image/") || video != nil else {
+            respond(415, "unsupported_media_type")
+            return
+        }
+        guard size <= (video == nil ? Self.maxBody : Self.maxVideoBody) else {
+            respond(413, video == nil ? "image_too_large" : "video_too_large")
             return
         }
         guard let id = request.headers["x-screenshot-id"], (1...256).contains(id.utf8.count),
@@ -191,12 +218,12 @@ private final class UploadConnection: @unchecked Sendable {
             return
         }
         let name = Inbox.FileName(uploadID: id)
-        let device = name.source.flatMap { source in
-            request.headers["x-device-id"].flatMap { ScreenshotDevice(source: source, installationID: $0) }
-        }
+        let device = name.source.flatMap(request.device(for:))
+        let profile = device.flatMap(request.profile(for:))
         var file: StagedFile?
         if !Inbox.contains(name, in: folder) {
-            let url = folder.appendingPathComponent(".screenshotsync-incoming-\(UUID().uuidString)")
+            var url = folder.appendingPathComponent(".screenshotsync-incoming-\(UUID().uuidString)")
+            if let video { url.appendPathExtension(video.rawValue) }
             do {
                 try Data().write(to: url, options: .withoutOverwriting)
                 file = try StagedFile(url: url, handle: FileHandle(forWritingTo: url))
@@ -206,7 +233,8 @@ private final class UploadConnection: @unchecked Sendable {
                 return
             }
         }
-        stage = Stage(file: file, name: name, device: device, remaining: size)
+        stage = Stage(file: file, name: name, device: device, profile: profile, video: video, remaining: size)
+        if video != nil { timer?.schedule(deadline: .now() + .seconds(600)) }
 
         if expectation == "100-continue" {
             connection.send(content: Data("HTTP/1.1 100 Continue\r\n\r\n".utf8),
@@ -229,18 +257,58 @@ private final class UploadConnection: @unchecked Sendable {
             self.stage = stage
             guard stage.remaining == 0 else { return }
             guard let file = stage.file else {
-                respond(200, "duplicate", key: "status")
+                finishUpload(stage, created: false)
                 return
             }
             try file.handle.close()
-            let created = try Inbox.save(staged: file.url, name: stage.name, device: stage.device, in: folder)
-            if created { onReceive() }
-            respond(created ? 201 : 200, created ? "saved" : "duplicate", key: "status")
+            if let video = stage.video {
+                validateVideo(at: file.url, format: video)
+            } else {
+                finishSave()
+            }
+        } catch {
+            respond(500, "cannot_write_inbox")
+        }
+    }
+
+    private func validateVideo(at url: URL, format: Inbox.Video) {
+        validationTask = Task { [weak self] in
+            let playable = await Inbox.playableVideo(at: url)
+            guard !Task.isCancelled, let self else { return }
+            queue.async { [weak self] in
+                guard let self, !closed else { return }
+                validationTask = nil
+                if playable {
+                    finishSave(videoSuffix: format.rawValue)
+                } else {
+                    respond(415, "invalid_video")
+                }
+            }
+        }
+    }
+
+    private func finishSave(videoSuffix: String? = nil) {
+        guard let stage, let file = stage.file else { return }
+        do {
+            let created: Bool
+            if let videoSuffix {
+                created = try Inbox.publish(staged: file.url, name: stage.name, device: stage.device,
+                                            suffix: videoSuffix, in: folder)
+            } else {
+                created = try Inbox.save(staged: file.url, name: stage.name, device: stage.device, in: folder)
+            }
+            finishUpload(stage, created: created)
         } catch Inbox.SaveError.invalidImage {
             respond(415, "invalid_image")
         } catch {
             respond(500, "cannot_write_inbox")
         }
+    }
+
+    private func finishUpload(_ stage: Stage, created: Bool) {
+        if created { onReceive(stage.device) }
+        if let device = stage.device, let profile = stage.profile { onDeviceInfo(device, profile, created) }
+        respond(created ? 201 : 200, created ? "saved" : "duplicate", key: "status")
     }
 
     private func authorized(_ value: String?) -> Bool {
@@ -281,6 +349,8 @@ private final class UploadConnection: @unchecked Sendable {
     func close() {
         guard !closed else { return }
         closed = true
+        validationTask?.cancel()
+        validationTask = nil
         timer?.cancel()
         timer = nil
         if let file = stage?.file {
@@ -295,6 +365,18 @@ private final class UploadConnection: @unchecked Sendable {
         let method: String
         let path: String
         let headers: [String: String]
+
+        func device(for source: ScreenshotSource) -> ScreenshotDevice? {
+            guard let id = headers["x-device-id"] else { return nil }
+            return ScreenshotDevice(source: source, installationID: id)
+        }
+
+        func profile(for device: ScreenshotDevice) -> DeviceProfile? {
+            guard headers["x-device-platform"] == device.source.rawValue, let header = headers["x-device-info"] else {
+                return nil
+            }
+            return DeviceProfile(header: header)
+        }
 
         init?(bytes: Data.SubSequence) {
             guard let text = String(data: bytes, encoding: .utf8) else { return nil }

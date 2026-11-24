@@ -14,6 +14,9 @@ struct ShotSyncApp: App {
                 .onChange(of: phase, initial: true) { _, newPhase in
                     sync.phaseChanged(newPhase)
                 }
+                .onReceive(NotificationCenter.default.publisher(for: UIApplication.userDidTakeScreenshotNotification)) { _ in
+                    sync.scanWhileActive()
+                }
         }
     }
 }
@@ -21,11 +24,16 @@ struct ShotSyncApp: App {
 private struct SyncHome: View {
     @ObservedObject var sync: PhotoSync
     @Environment(\.openURL) private var openURL
-    @State private var showConnection = false
+    @State private var connection: ConnectionScreen?
     @State private var manualDestination: ManualDestination?
 
     private let accent = Color.indigo
     private let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "即图"
+    private var homeTitle: String {
+        guard let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+              !version.isEmpty else { return appName }
+        return "\(appName) v\(version)"
+    }
 
     var body: some View {
         NavigationStack {
@@ -41,8 +49,9 @@ private struct SyncHome: View {
                         Button {
                             manualDestination = ManualDestination(receiver: receiver)
                         } label: {
-                            Label("手动选图", systemImage: "photo.on.rectangle.angled")
+                            Text("手动发送")
                                 .font(.headline)
+                                .multilineTextAlignment(.center)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 5)
                         }
@@ -51,16 +60,18 @@ private struct SyncHome: View {
                         .listRowBackground(Color.clear)
                         .accessibilityIdentifier("manual-photos")
                     } footer: {
-                        Text("可从系统相册选择历史截图或普通照片，确认后发送。")
+                        Text("可从系统相册选择照片或视频，确认后发送。")
                     }
 
                     Section {
                         Button {
-                            showConnection = true
+                            connection = .manual
                         } label: {
                             LabeledContent("Mac 接收端", value: receiver.displayAddress)
                                 .foregroundStyle(.primary)
                         }
+
+                        scanButton
 
                         if receiver.automatic {
                             Button {
@@ -75,14 +86,25 @@ private struct SyncHome: View {
                                 Label("继续自动同步", systemImage: "play.circle")
                             }
                         }
+                        if #available(iOS 27.0, *) {
+                            NavigationLink {
+                                ScreenshotAutomationGuide()
+                            } label: {
+                                Label("设置后台截屏同步", systemImage: "bolt.circle")
+                            }
+                        }
                     } footer: {
-                        Text(receiver.automatic
-                             ? "回到即图时会检查新截图。后台同步由 iOS 安排，时间可能延后。"
-                             : "继续后会补传配对成功后尚未同步的新截图。")
+                        if !receiver.automatic {
+                            Text("继续后会补传配对成功后尚未同步的新截图。")
+                        } else if #available(iOS 27.0, *) {
+                            Text("要在其他 App 中截屏后立即发送，请设置一次后台截屏同步。")
+                        } else {
+                            Text("返回即图会立即检查待传截图，后台补传由 iOS 调度。")
+                        }
                     }
 
                     Section("最近传输") {
-                        LabeledContent("已同步", value: "\(sync.sentCount) 张")
+                        LabeledContent("已同步", value: "\(sync.sentCount) 项")
                         LabeledContent("上次同步", value: lastSentLabel)
                     }
 
@@ -95,13 +117,14 @@ private struct SyncHome: View {
                     }
                 } else {
                     Section {
+                        scanButton
                         Button {
-                            showConnection = true
+                            connection = .manual
                         } label: {
-                            Label("连接 Mac", systemImage: "desktopcomputer")
+                            Label("手动配对", systemImage: "keyboard")
                         }
                     } footer: {
-                        Text("在 Mac 上打开「\(appName)」，将两台设备连接到同一网络，再输入接收端的地址和配对码。")
+                        Text("两台设备连接同一网络后，在 Mac 上打开「\(appName)」，点击「扫码配对」显示二维码。")
                     }
                 }
 
@@ -113,10 +136,10 @@ private struct SyncHome: View {
                     }
                 }
             }
-            .navigationTitle(appName)
+            .navigationTitle(homeTitle)
             .tint(accent)
-            .sheet(isPresented: $showConnection) {
-                ConnectionForm(sync: sync)
+            .sheet(item: $connection) { screen in
+                ConnectionForm(sync: sync, screen: screen)
                     .tint(accent)
             }
             .sheet(item: $manualDestination) { destination in
@@ -126,16 +149,32 @@ private struct SyncHome: View {
         }
     }
 
+    private var scanButton: some View {
+        Button {
+            connection = .scan
+        } label: {
+            Label(sync.receiver == nil ? "扫一扫配对" : "扫码更换 Mac", systemImage: "qrcode.viewfinder")
+        }
+        .accessibilityIdentifier("scan-mac")
+    }
+
     private var statusCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        let current = status
+        return VStack(alignment: .leading, spacing: 14) {
             Image(systemName: "iphone.and.arrow.forward")
                 .font(.system(size: 30, weight: .medium))
                 .foregroundStyle(accent)
                 .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 5) {
-                Text(status)
-                    .font(.title2.weight(.semibold))
+                HStack(spacing: 8) {
+                    Text(current.title)
+                        .font(.title2.weight(.semibold))
+                    Circle()
+                        .fill(current.color)
+                        .frame(width: 10, height: 10)
+                        .accessibilityHidden(true)
+                }
                 Text(statusDetail)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -147,22 +186,22 @@ private struct SyncHome: View {
         .accessibilityElement(children: .combine)
     }
 
-    private var status: String {
-        guard let receiver = sync.receiver else { return "连接你的 Mac" }
+    private var status: (title: String, color: Color) {
+        guard let receiver = sync.receiver else { return ("连接你的 Mac", .red) }
         if receiver.pairedAt == nil {
-            return sync.working ? "正在验证连接" : "等待 Mac 验证"
+            return (sync.working ? "正在验证连接" : "等待 Mac 验证", .red)
         }
-        if !receiver.automatic { return "自动同步已暂停" }
-        if !sync.canReadPhotos { return "等待相册授权" }
-        if sync.errorMessage == PhotoSync.connectionError { return "已配对 · Mac 暂不可达" }
-        if sync.working { return "正在自动同步" }
-        if sync.permission == .limited { return "自动同步 · 照片权限有限" }
-        if sync.errorMessage != nil { return "自动同步需要处理" }
-        return "自动同步已开启"
+        if !receiver.automatic { return ("自动同步已暂停", .red) }
+        if !sync.canReadPhotos { return ("等待相册授权", .red) }
+        if sync.errorMessage == PhotoSync.connectionError { return ("已配对 · Mac 暂不可达", .red) }
+        if sync.errorMessage != nil { return ("自动同步需要处理", .red) }
+        if sync.working { return ("正在自动同步", .green) }
+        if sync.permission == .limited { return ("自动同步 · 照片权限有限", .green) }
+        return ("自动同步已开启", .green)
     }
 
     private var statusDetail: String {
-        guard let receiver = sync.receiver else { return "通过局域网把截图和所选图片发送到 Mac。" }
+        guard let receiver = sync.receiver else { return "通过局域网把截图、照片和视频发送到 Mac。" }
         guard let pairedAt = receiver.pairedAt else { return "连接成功后，才会开始记录新截图。" }
         let date = pairedAt.formatted(date: .abbreviated, time: .shortened)
         return "仅自动同步 \(date) 配对成功后截取的新截图。"
@@ -174,7 +213,7 @@ private struct SyncHome: View {
 
     private var photoAccessExplanation: String {
         if sync.permission == .limited { return "当前只会同步获准访问的截图。允许完全访问后，新截图可以自动加入同步。" }
-        return "允许访问相册后会自动识别新截图。也可先通过系统相册手动选图。"
+        return "允许访问相册后会自动识别新截图。也可先通过系统相册手动发送。"
     }
 
     private var photoAccess: some View {
@@ -195,24 +234,83 @@ private struct SyncHome: View {
     }
 }
 
+private struct ScreenshotAutomationGuide: View {
+    var body: some View {
+        List {
+            Section {
+                Text("在「快捷指令」中新建快捷指令，搜索并添加即图的「同步新截图到 Mac」操作。")
+                Text("在编辑器的「自动化」里添加「截屏」，选择存储到「照片」，并在这台 iPhone 上启用自动化。")
+                Link("新建快捷指令", destination: URL(string: "shortcuts://create-shortcut")!)
+            } footer: {
+                Text("先允许即图完全访问照片和本地网络。设置好后，在其他 App 中正常截屏并存入「照片」，即图就会尝试发送到当前配对的 Mac。暂停自动同步也会暂停这个操作。")
+            }
+        }
+        .navigationTitle("后台截屏同步")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private enum ConnectionScreen: Hashable, Identifiable {
+    case scan, manual
+    var id: Self { self }
+}
+
 private struct ConnectionForm: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var sync: PhotoSync
     @State private var address: String
     @State private var code: String
     @State private var connecting = false
+    @State private var screen: ConnectionScreen
+    @State private var verification: Task<Void, Never>?
     @State private var confirmDisconnect = false
     @State private var errorMessage: String?
 
-    init(sync: PhotoSync) {
+    init(sync: PhotoSync, screen: ConnectionScreen) {
         self.sync = sync
+        _screen = State(initialValue: screen)
         _address = State(initialValue: sync.receiver?.displayAddress ?? "")
         _code = State(initialValue: sync.receiver?.code ?? "")
     }
 
     var body: some View {
+        if screen == .scan {
+            PairingScanner(manual: { screen = .manual }) { text in
+                screen = .manual
+                startConnection(qr: text)
+            }
+        } else {
+            form
+        }
+    }
+
+    private var form: some View {
         NavigationStack {
             Form {
+                if verification != nil {
+                    HStack(spacing: 12) {
+                        ProgressView()
+                        Text("正在验证连接")
+                    }
+                }
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.subheadline)
+                        .foregroundStyle(.orange)
+                }
+                Section {
+                    Button {
+                        errorMessage = nil
+                        screen = .scan
+                    } label: {
+                        Label("扫一扫配对", systemImage: "qrcode.viewfinder")
+                    }
+                    .disabled(connecting)
+                    .accessibilityIdentifier("scan-pairing-code")
+                } footer: {
+                    Text(sync.receiver == nil ? "扫描 Mac 上的即图配对二维码即可连接。" : "扫描另一台 Mac 的即图配对二维码，验证成功后将切换到新 Mac。")
+                }
+
                 Section {
                     TextField("192.168.1.25:43871", text: $address)
                         .accessibilityLabel("Mac 地址和端口")
@@ -225,31 +323,18 @@ private struct ConnectionForm: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .privacySensitive()
+                } header: {
+                    Text("手动配对")
                 } footer: {
                     Text("输入 Mac App 显示的地址和配对码，端口默认为 43871。")
                 }
 
                 Section {
-                    Button {
-                        Task { await connect() }
-                    } label: {
-                        if connecting {
-                            HStack(spacing: 12) {
-                                ProgressView()
-                                Text("正在验证连接")
-                            }
-                        } else {
-                            Text(sync.receiver == nil ? "连接 Mac" : "验证并保存")
-                        }
+                    Button(sync.receiver == nil ? "连接 Mac" : "验证并保存") {
+                        startConnection()
                     }
                     .disabled(connecting || address.isEmpty || code.isEmpty)
                     .accessibilityIdentifier("confirm-connection")
-
-                    if let errorMessage {
-                        Text(errorMessage)
-                            .font(.subheadline)
-                            .foregroundStyle(.orange)
-                    }
                 }
 
                 if sync.receiver != nil {
@@ -264,8 +349,11 @@ private struct ConnectionForm: View {
             .interactiveDismissDisabled(connecting)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
-                        .disabled(connecting)
+                    Button("取消") {
+                        verification?.cancel()
+                        dismiss()
+                    }
+                    .disabled(connecting && verification == nil)
                 }
             }
             .confirmationDialog("断开与当前 Mac 的连接？", isPresented: $confirmDisconnect, titleVisibility: .visible) {
@@ -278,24 +366,34 @@ private struct ConnectionForm: View {
         }
     }
 
-    private func connect() async {
+    private func startConnection(qr: String? = nil) {
+        guard !connecting else { return }
         connecting = true
-        defer { connecting = false }
         errorMessage = nil
-        do {
-            let input = address.trimmingCharacters(in: .whitespacesAndNewlines)
-            let fields = input.replacingOccurrences(of: "http://", with: "", options: .anchored).components(separatedBy: ":")
-            guard fields.count <= 2 else { throw SyncIssue.invalidAddress }
-            let receiver = try Receiver(
-                address: fields[0], port: fields.count == 2 ? fields[1] : "43871", code: code,
-                automatic: true
-            )
-            try await sync.connect(receiver)
-            dismiss()
-        } catch is URLError {
-            errorMessage = PhotoSync.connectionError
-        } catch {
-            errorMessage = error.localizedDescription
+        verification = Task {
+            defer {
+                connecting = false
+                verification = nil
+            }
+            do {
+                if let qr {
+                    try await sync.connect(scannedCode: qr)
+                } else {
+                    let input = address.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let fields = input.replacingOccurrences(of: "http://", with: "", options: .anchored).components(separatedBy: ":")
+                    guard fields.count <= 2 else { throw SyncIssue.invalidAddress }
+                    let receiver = try Receiver(
+                        address: fields[0], port: fields.count == 2 ? fields[1] : "43871", code: code,
+                        automatic: true
+                    )
+                    try await sync.connect(receiver)
+                }
+                dismiss()
+            } catch {
+                if !Task.isCancelled {
+                    errorMessage = error is URLError ? PhotoSync.connectionError : error.localizedDescription
+                }
+            }
         }
     }
 
@@ -331,13 +429,13 @@ private struct ManualSelectionSheet: View {
                 Section {
                     LabeledContent("发送到 Mac", value: destination.displayAddress)
                     if remaining.isEmpty, summary == nil {
-                        Text("从系统相册选择要发送的图片。")
+                        Text("从系统相册选择要发送的照片或视频。")
                             .foregroundStyle(.secondary)
                     } else if !remaining.isEmpty {
-                        Text("已选 \(remaining.count) 张")
+                        Text("已选 \(remaining.count) 项")
                         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
                             ForEach(Array(remaining.enumerated()), id: \.offset) { _, item in
-                                SelectedPhotoThumbnail(item: item)
+                                SelectedMediaThumbnail(item: item)
                             }
                         }
                     }
@@ -357,12 +455,12 @@ private struct ManualSelectionSheet: View {
                         Button("停止本次发送", role: .destructive) { transfer?.cancel() }
                     } else {
                         if !remaining.isEmpty {
-                            Button(errorMessage == nil ? "发送 \(remaining.count) 张" : "重试 \(remaining.count) 张") {
+                            Button(errorMessage == nil ? "发送 \(remaining.count) 项" : "重试 \(remaining.count) 项") {
                                 send()
                             }
                             .accessibilityIdentifier("send-picked-photos")
                         }
-                        Button("选择图片") { showingPicker = true }
+                        Button("选择照片或视频") { showingPicker = true }
                             .accessibilityIdentifier("open-photo-picker")
                     }
                     if let errorMessage {
@@ -383,7 +481,7 @@ private struct ManualSelectionSheet: View {
             .interactiveDismissDisabled(transfer != nil)
             .photosPicker(
                 isPresented: $showingPicker, selection: $selection, selectionBehavior: .ordered,
-                matching: .images, preferredItemEncoding: .current, photoLibrary: .shared()
+                matching: .any(of: [.images, .videos]), preferredItemEncoding: .current, photoLibrary: .shared()
             )
             .onChange(of: selection) { _, items in
                 remaining = items
@@ -410,9 +508,9 @@ private struct ManualSelectionSheet: View {
             let result = await sync.sendSelection(items, to: destination) { completed = $0 }
             remaining = result.remaining
             if result.sent > 0 {
-                summary = "已发送 \(result.sent) 张"
+                summary = "已发送 \(result.sent) 项"
             } else if result.alreadySent > 0 {
-                summary = "已跳过 \(result.alreadySent) 张已同步的图片"
+                summary = "已跳过 \(result.alreadySent) 个已发送的项目"
             }
             errorMessage = result.message
             transfer = nil
@@ -420,7 +518,7 @@ private struct ManualSelectionSheet: View {
     }
 }
 
-private struct SelectedPhotoThumbnail: View {
+private struct SelectedMediaThumbnail: View {
     let item: PhotosPickerItem
     @State private var thumbnail: UIImage?
 
@@ -429,7 +527,13 @@ private struct SelectedPhotoThumbnail: View {
             .fill(Color.secondary.opacity(0.1))
             .aspectRatio(1, contentMode: .fit)
             .overlay {
-                if let thumbnail {
+                if item.isVideoSelection {
+                    VStack(spacing: 4) {
+                        Image(systemName: "play.rectangle")
+                        Text("视频").font(.caption2)
+                    }
+                    .foregroundStyle(.secondary)
+                } else if let thumbnail {
                     Image(uiImage: thumbnail)
                         .resizable()
                         .scaledToFill()
@@ -439,9 +543,10 @@ private struct SelectedPhotoThumbnail: View {
                 }
             }
             .clipShape(.rect(cornerRadius: 6))
-            .accessibilityHidden(true)
+            .accessibilityHidden(!item.isVideoSelection)
             .task(id: item) {
                 thumbnail = nil
+                guard !item.isVideoSelection else { return }
                 let preview = try? await item.loadTransferable(type: PickerThumbnail.self)
                 if !Task.isCancelled, let preview { thumbnail = UIImage(cgImage: preview.image) }
             }

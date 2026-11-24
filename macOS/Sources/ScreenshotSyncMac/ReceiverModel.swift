@@ -38,9 +38,14 @@ final class ReceiverModel: ObservableObject {
     @Published private(set) var recent = [ScreenshotSource?: [ReceivedScreenshot]]()
     @Published private(set) var isLoadingInbox = false
     @Published private var deviceNames: [String: String]
+    @Published private var profiles: [String: DeviceProfile]
     @Published var errorMessage: String?
 
+    static let allPicturesLabel = "全部图片"
     private static let deviceNamesKey = "screenshotDeviceNames"
+    private static let profilesKey = "screenshotDeviceProfiles"
+    // An empty name remembers a deleted device without letting older media recreate its tab.
+    private static let deletedDeviceName = ""
     private let defaults: UserDefaults
     private let pathMonitor = NWPathMonitor()
     private var receiver: Receiver?
@@ -50,6 +55,9 @@ final class ReceiverModel: ObservableObject {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         deviceNames = defaults.dictionary(forKey: Self.deviceNamesKey) as? [String: String] ?? [:]
+        profiles = defaults.data(forKey: Self.profilesKey).flatMap {
+            try? PropertyListDecoder().decode([String: DeviceProfile].self, from: $0)
+        } ?? [:]
         let path = defaults.string(forKey: "inboxPath")
         let defaultFolder = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Pictures/截图同步", isDirectory: true)
@@ -88,10 +96,15 @@ final class ReceiverModel: ObservableObject {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             let id = UUID()
             generation = id
-            let receiver = try Receiver(folder: folder, token: token) { [weak self] state in
+            let receiver = try Receiver(folder: folder, token: token, onDeviceInfo: { [weak self] device, profile, createdFile in
+                Task { @MainActor in
+                    guard let self, self.generation == id else { return }
+                    self.record(profile, for: device, createdFile: createdFile)
+                }
+            }) { [weak self] state in
                 Task { @MainActor in self?.updateStatus(state, generation: id) }
-            } onReceive: { [weak self] in
-                Task { @MainActor in self?.refreshRecent() }
+            } onReceive: { [weak self] device in
+                Task { @MainActor in self?.receivedMedia(from: device) }
             }
             self.receiver = receiver
             status = .starting
@@ -179,25 +192,57 @@ final class ReceiverModel: ObservableObject {
         }
     }
 
+    func saveLocalScreenshot(_ image: CGImage) async throws {
+        let destination = folder
+        try await Task.detached(priority: .userInitiated) {
+            try Inbox.saveLocalScreenshot(image, in: destination)
+        }.value
+        refreshRecent()
+    }
+
     func knownDevices(for source: ScreenshotSource) -> [ScreenshotDevice] {
-        deviceNames.keys.compactMap(ScreenshotDevice.init(id:)).filter { $0.source == source }.sorted {
+        deviceNames.compactMap { id, name in
+            name == Self.deletedDeviceName ? nil : ScreenshotDevice(id: id)
+        }.filter { $0.source == source }.sorted {
             let order = name(for: $0).localizedStandardCompare(name(for: $1))
             return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
         }
     }
 
     func name(for device: ScreenshotDevice) -> String {
-        deviceNames[device.id] ?? defaultNamePrefix(for: device.source)
+        registeredName(for: device) ?? defaultNamePrefix(for: device.source)
+    }
+
+    func profile(for device: ScreenshotDevice) -> DeviceProfile? {
+        profiles[device.id]
+    }
+
+    func systemDescription(for device: ScreenshotDevice) -> String? {
+        guard let version = profile(for: device)?.osVersion else { return nil }
+        let system = device.source == .harmony ? "HarmonyOS" : device.source.label
+        return version.localizedCaseInsensitiveContains(system) ? version : "\(system) \(version)"
+    }
+
+    func subtitle(for device: ScreenshotDevice) -> String? {
+        guard let profile = profile(for: device) else { return nil }
+        let title = nameKey(name(for: device))
+        return [profile.model, profile.name, systemDescription(for: device)]
+            .compactMap { $0 }.first { nameKey($0) != title }
+    }
+
+    func recognizedDevice(for media: ReceivedScreenshot) -> ScreenshotDevice? {
+        guard let device = media.device, registeredName(for: device) != nil else { return nil }
+        return device
     }
 
     func rename(_ device: ScreenshotDevice, to name: String) throws {
-        guard deviceNames[device.id] != nil else { throw DeviceNameError.unknownDevice }
+        guard registeredName(for: device) != nil else { throw DeviceNameError.unknownDevice }
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (1...24).contains(name.count), name.rangeOfCharacter(from: .controlCharacters) == nil else {
             throw DeviceNameError.invalidName
         }
         let match = nameKey(name)
-        guard match != nameKey("全部手机"), match != nameKey("未识别设备"),
+        guard match != nameKey(Self.allPicturesLabel), match != nameKey("未识别设备"),
               !knownDevices(for: device.source).contains(where: { $0 != device && nameKey(self.name(for: $0)) == match }) else {
             throw DeviceNameError.nameUnavailable
         }
@@ -206,23 +251,59 @@ final class ReceiverModel: ObservableObject {
         saveDeviceNames(renamed)
     }
 
+    func removeDevice(_ device: ScreenshotDevice) {
+        guard registeredName(for: device) != nil else { return }
+        var names = deviceNames
+        names[device.id] = Self.deletedDeviceName
+        saveDeviceNames(names)
+        if profiles.removeValue(forKey: device.id) != nil { saveProfiles() }
+    }
+
+    private func record(_ profile: DeviceProfile, for device: ScreenshotDevice, createdFile: Bool) {
+        let name = deviceNames[device.id]
+        guard name != Self.deletedDeviceName || createdFile else { return }
+        if name == nil || name == Self.deletedDeviceName {
+            let used = Set(knownDevices(for: device.source).map { nameKey(self.name(for: $0)) })
+            var names = deviceNames
+            names[device.id] = availableName(for: device.source, profile: profile, used: used)
+            saveDeviceNames(names)
+        }
+        if profiles[device.id] != profile {
+            profiles[device.id] = profile
+            saveProfiles()
+        }
+    }
+
+    private func saveProfiles() {
+        if let data = try? PropertyListEncoder().encode(profiles) {
+            defaults.set(data, forKey: Self.profilesKey)
+        }
+    }
+
+    private func registeredName(for device: ScreenshotDevice) -> String? {
+        guard let name = deviceNames[device.id], name != Self.deletedDeviceName else { return nil }
+        return name
+    }
+
+    private func receivedMedia(from device: ScreenshotDevice?) {
+        if let device, deviceNames[device.id] == Self.deletedDeviceName {
+            var names = deviceNames
+            names.removeValue(forKey: device.id)
+            saveDeviceNames(names)
+        }
+        refreshRecent()
+    }
+
     private func registerDevices(in received: [ScreenshotSource?: [ReceivedScreenshot]]) {
         var names = deviceNames
-        for source in ScreenshotSource.allCases {
+        for source in ScreenshotSource.allCases where source != .mac {
             let existingIDs = knownDevices(for: source)
             var usedNames = Set(existingIDs.map { nameKey(name(for: $0)) })
-            var ordinal = 1
             for screenshot in received[source, default: []].reversed() {
                 guard let device = screenshot.device, names[device.id] == nil else { continue }
-                let prefix = defaultNamePrefix(for: source)
-                var alias = "\(prefix) \(ordinal)"
-                while usedNames.contains(nameKey(alias)) {
-                    ordinal += 1
-                    alias = "\(prefix) \(ordinal)"
-                }
+                let alias = availableName(for: source, profile: nil, used: usedNames)
                 names[device.id] = alias
                 usedNames.insert(nameKey(alias))
-                ordinal += 1
             }
         }
         if names != deviceNames { saveDeviceNames(names) }
@@ -232,11 +313,28 @@ final class ReceiverModel: ObservableObject {
         name.precomposedStringWithCanonicalMapping.folding(options: [.caseInsensitive, .widthInsensitive], locale: nil)
     }
 
+    private func availableName(for source: ScreenshotSource, profile: DeviceProfile?, used: Set<String>) -> String {
+        let reserved = [Self.allPicturesLabel, "未识别设备"].map(nameKey)
+        let candidates = source == .iOS ? [profile?.name, profile?.model] : []
+        let reported = candidates.compactMap { $0 }
+            .map { String($0.prefix(24)) }.first { !reserved.contains(nameKey($0)) }
+        if let reported, !used.contains(nameKey(reported)) { return reported }
+        let prefix = reported ?? defaultNamePrefix(for: source)
+        var number = reported == nil ? 1 : 2
+        while true {
+            let suffix = " \(number)"
+            let candidate = String(prefix.prefix(24 - suffix.count)) + suffix
+            if !used.contains(nameKey(candidate)) { return candidate }
+            number += 1
+        }
+    }
+
     private func defaultNamePrefix(for source: ScreenshotSource) -> String {
         switch source {
         case .iOS: "iPhone"
-        case .android: "Android 手机"
-        case .harmony: "鸿蒙手机"
+        case .android: "Android"
+        case .harmony: "Harmony"
+        case .mac: "本机"
         }
     }
 

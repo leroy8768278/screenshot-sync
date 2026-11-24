@@ -31,17 +31,17 @@ final class ManualSend implements AutoCloseable {
         try (ReceiverConnection connection = new ReceiverConnection(context, pairing.host(), pairing.code());
              DeliveryReceipts receipts = new DeliveryReceipts(context)) {
             synchronized (this) {
-                ImageTransfer.checkCancelled(() -> cancelled);
+                MediaTransfer.checkCancelled(() -> cancelled);
                 receiver = connection;
             }
-            ImageTransfer.checkCancelled(() -> cancelled(context, pairing));
+            MediaTransfer.checkCancelled(() -> cancelled(context, pairing));
             response = connection.test();
             if (response != 200) {
                 return new Result(pending, sent, duplicates, responseError(response), response);
             }
             ContentResolver resolver = context.getContentResolver();
             for (Uri uri : selected) {
-                ImageTransfer.checkCancelled(() -> cancelled(context, pairing));
+                MediaTransfer.checkCancelled(() -> cancelled(context, pairing));
                 String name;
                 String type;
                 try {
@@ -51,18 +51,18 @@ final class ManualSend implements AutoCloseable {
                     error = R.string.manual_unreadable;
                     continue;
                 }
-                String extension = ScreenshotCatalog.extension(type);
+                String extension = extension(type);
                 if (extension.isEmpty()) {
                     error = R.string.manual_unsupported;
                     continue;
                 }
                 try {
-                    int status = ImageTransfer.send(context, pairing, connection, receipts, uri, null,
+                    int status = MediaTransfer.send(context, pairing, connection, receipts, uri, null,
                         ScreenshotCatalog.filename(name, 0, 0, extension), type, cancellation,
                         () -> cancelled(context, pairing));
-                    if (status == 200 || status == 201 || status == ImageTransfer.ALREADY_SENT) {
+                    if (status == 200 || status == 201 || status == MediaTransfer.ALREADY_SENT) {
                         pending.remove(uri);
-                        if (status == ImageTransfer.ALREADY_SENT || status == 200) {
+                        if (status == MediaTransfer.ALREADY_SENT || status == 200) {
                             duplicates++;
                         } else {
                             sent++;
@@ -115,15 +115,31 @@ final class ManualSend implements AutoCloseable {
     }
 
     private static String type(ContentResolver resolver, Uri uri, String filename) {
-        String type = resolver.getType(uri);
-        if (ScreenshotCatalog.extension(type).isEmpty() && filename != null) {
-            int separator = filename.lastIndexOf('.');
-            if (separator >= 0) {
-                type = MimeTypeMap.getSingleton().getMimeTypeFromExtension(
-                    filename.substring(separator + 1).toLowerCase(Locale.ROOT));
-            }
+        String reportedType = resolver.getType(uri);
+        String type = reportedType == null ? "" : reportedType.toLowerCase(Locale.ROOT);
+        if (!extension(type).isEmpty() || filename == null) {
+            return type;
         }
-        return type;
+        int separator = filename.lastIndexOf('.');
+        if (separator < 0) {
+            return type;
+        }
+        String suffix = filename.substring(separator + 1).toLowerCase(Locale.ROOT);
+        return switch (suffix) {
+            case "mp4" -> "video/mp4";
+            case "mov" -> "video/quicktime";
+            case "m4v" -> "video/x-m4v";
+            default -> MimeTypeMap.getSingleton().getMimeTypeFromExtension(suffix);
+        };
+    }
+
+    private static String extension(String type) {
+        return switch (type == null ? "" : type) {
+            case "video/mp4" -> ".mp4";
+            case "video/quicktime" -> ".mov";
+            case "video/x-m4v" -> ".m4v";
+            default -> ScreenshotCatalog.extension(type);
+        };
     }
 
     private static int responseError(int response) {

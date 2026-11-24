@@ -1,7 +1,9 @@
 import CoreTransferable
+import CryptoKit
 import ImageIO
 import PhotosUI
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 import os
 
@@ -108,6 +110,75 @@ struct PickerThumbnail: Transferable, Sendable {
     }
 }
 
+extension PhotosPickerItem {
+    var isVideoSelection: Bool {
+        let primary = supportedContentTypes.first { $0.conforms(to: .image) || $0.conforms(to: .movie) }
+        return primary?.conforms(to: .movie) == true
+    }
+}
+
+final class SelectedVideo: Transferable, Sendable {
+    static let maxBytes = 512 * 1024 * 1024
+
+    let file: URL
+    let mimeType: String
+    let fileExtension: String
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .movie) { received in
+            try Self(staging: received.file)
+        }
+    }
+
+    init(staging source: URL) throws {
+        let values = try source.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        guard values.isRegularFile == true, let size = values.fileSize, size > 0 else {
+            throw SyncIssue.unavailableVideo
+        }
+        guard size <= Self.maxBytes else { throw SyncIssue.videoTooLarge }
+        let ext = source.pathExtension.lowercased()
+        switch ext {
+        case "mp4": mimeType = "video/mp4"
+        case "mov": mimeType = "video/quicktime"
+        case "m4v": mimeType = "video/x-m4v"
+        default: throw SyncIssue.unsupportedVideo
+        }
+
+        fileExtension = ext
+        let temporaryFile = FileManager.default.temporaryDirectory
+            .appending(path: "SelectedVideo-\(UUID()).\(ext)", directoryHint: .notDirectory)
+        try Task.checkCancellation()
+        do {
+            try FileManager.default.copyItem(at: source, to: temporaryFile)
+            try Task.checkCancellation()
+        } catch {
+            try? FileManager.default.removeItem(at: temporaryFile)
+            throw error
+        }
+        file = temporaryFile
+    }
+
+    deinit { try? FileManager.default.removeItem(at: file) }
+
+    func uploadID() async throws -> String {
+        let fingerprint = Task.detached(priority: .userInitiated) { [self] in
+            let handle = try FileHandle(forReadingFrom: file)
+            defer { try? handle.close() }
+            var hash = SHA256()
+            while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+                try Task.checkCancellation()
+                hash.update(data: chunk)
+            }
+            return "ios-\(hash.finalize().map { String(format: "%02x", $0) }.joined())"
+        }
+        return try await withTaskCancellationHandler {
+            try await fingerprint.value
+        } onCancel: {
+            fingerprint.cancel()
+        }
+    }
+}
+
 // PhotoKit can complete a read on its own queue while the sync task is being cancelled.
 private final class PhotoReadRequest: Sendable {
     typealias Cancel = @Sendable () -> Void
@@ -188,7 +259,25 @@ private final class LibraryObserver: NSObject, PHPhotoLibraryChangeObserver {
     weak var sync: PhotoSync?
 
     func photoLibraryDidChange(_ changeInstance: PHChange) {
-        Task { @MainActor [weak self] in self?.sync?.libraryChanged() }
+        Task { @MainActor [weak self] in self?.sync?.scanWhileActive() }
+    }
+}
+
+@MainActor
+private final class ScreenshotTransferTime {
+    private var identifier: UIBackgroundTaskIdentifier = .invalid
+
+    init(operation: Task<Bool, Never>) {
+        identifier = UIApplication.shared.beginBackgroundTask(withName: "Send screenshot") { [weak self] in
+            operation.cancel()
+            self?.end()
+        }
+    }
+
+    func end() {
+        guard identifier != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(identifier)
+        identifier = .invalid
     }
 }
 
@@ -214,6 +303,7 @@ final class PhotoSync: ObservableObject {
     private let observer = LibraryObserver()
     private var observingLibrary = false
     private var history: SyncHistory?
+    private var registration: Task<Void, Never>?
     private var changingReceiver = false
     private var active = false
     private var scanAgain = false
@@ -253,30 +343,43 @@ final class PhotoSync: ObservableObject {
     }
 
     func connect(_ candidate: Receiver) async throws {
+        try await connect {
+            try await ReceiverClient.check(candidate)
+            return candidate
+        }
+    }
+
+    func connect(scannedCode: String) async throws {
+        try await connect { try await ReceiverClient.verifiedReceiver(in: scannedCode) }
+    }
+
+    private func connect(verify: () async throws -> Receiver) async throws {
         guard !changingReceiver, !sendingManually else { throw SyncIssue.syncBusy }
         changingReceiver = true
         defer {
             changingReceiver = false
-            libraryChanged()
+            scanWhileActive()
         }
 
-        try await ReceiverClient.check(candidate)
+        let candidate = try await verify()
         try Task.checkCancellation()
         let connectedAt = Date.now
         await haltAutomaticWork()
         try Task.checkCancellation()
 
         var verified = candidate
-        if let receiver, receiver.code == candidate.code {
-            verified.pairedAt = receiver.pairedAt ?? connectedAt
+        verified.pairedAt = connectedAt
+        if let receiver {
             verified.automatic = receiver.automatic
-        } else {
-            verified.pairedAt = connectedAt
+            if receiver.code == candidate.code {
+                verified.pairedAt = receiver.pairedAt ?? connectedAt
+            }
         }
         let history = try SyncHistory(key: verified.historyKey)
         try ReceiverStore.save(verified)
         receiver = verified
         self.history = history
+        registerDevice(with: verified)
         errorMessage = nil
         updateStats()
     }
@@ -286,10 +389,12 @@ final class PhotoSync: ObservableObject {
         changingReceiver = true
         defer {
             changingReceiver = false
-            libraryChanged()
+            scanWhileActive()
         }
         await haltAutomaticWork()
         try ReceiverStore.clear()
+        registration?.cancel()
+        registration = nil
         BGRefresh.cancel()
         receiver = nil
         history = nil
@@ -310,7 +415,7 @@ final class PhotoSync: ObservableObject {
             errorMessage = nil
             if enabled {
                 self.receiver = receiver
-                libraryChanged()
+                scanWhileActive()
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -319,7 +424,7 @@ final class PhotoSync: ObservableObject {
 
     func requestPhotoAccess() async {
         updatePhotoAccess(await PHPhotoLibrary.requestAuthorization(for: .readWrite))
-        if canReadPhotos { libraryChanged() }
+        if canReadPhotos { scanWhileActive() }
     }
 
     func phaseChanged(_ phase: ScenePhase) {
@@ -328,7 +433,10 @@ final class PhotoSync: ObservableObject {
         if active {
             resetRetry()
             if history == nil { reloadReceiver() }
-            libraryChanged()
+            if registration == nil, let receiver, receiver.pairedAt != nil {
+                registerDevice(with: receiver, verifyAddress: true)
+            }
+            scanWhileActive()
         } else {
             pendingScan?.cancel()
             pendingScan = nil
@@ -337,24 +445,76 @@ final class PhotoSync: ObservableObject {
         }
     }
 
-    fileprivate func libraryChanged() {
+    func scanWhileActive() {
         guard active, !changingReceiver, !sendingManually, let receiver,
               receiver.pairedAt == nil || (receiver.automatic && canReadPhotos) else { return }
-        pendingScan?.cancel()
+        if runningScan != nil {
+            scanAgain = true
+            return
+        }
+        guard pendingScan == nil else { return }
         pendingScan = Task {
-            do {
-                try await Task.sleep(for: .milliseconds(700))
-            } catch {
-                return
-            }
+            guard !Task.isCancelled else { return }
             pendingScan = nil
             _ = await scan()
+        }
+    }
+
+    // Shortcuts invokes this in the app process when iOS saves a screenshot, including while the UI is inactive.
+    func syncScreenshotsFromAutomation() async throws {
+        if receiver == nil || history == nil { reloadReceiver() }
+        guard let destination = receiver, let cutoff = destination.pairedAt else {
+            throw AutomationIssue("请先在即图中完成 Mac 配对。")
+        }
+        guard destination.automatic else { return }
+        let started = ContinuousClock.now
+        var checkedID: String?
+        // Deliver what is already visible immediately. A save trigger can arrive while Photos still shows
+        // the prior screenshot; briefly re-fetch its newest asset, even if another scan just uploaded one.
+        let visibilityChecks: [Duration] = [.zero, .milliseconds(250), .milliseconds(750), .seconds(2)]
+        for offset in visibilityChecks {
+            if offset != .zero { try await Task.sleep(until: started + offset, clock: .continuous) }
+            try checkAutomationDestination(destination)
+            // An existing scan may have fetched its snapshot before this screenshot was saved.
+            while let earlier = runningScan {
+                _ = await earlier.value
+                try checkAutomationDestination(destination)
+            }
+            guard let latest = Self.screenshots(after: cutoff, limit: 1).firstObject else { continue }
+            let id = Self.uploadID(latest.localIdentifier)
+            guard id != checkedID else { continue }
+            let success = await scan(background: true)
+            try checkAutomationDestination(destination)
+            guard success, history?.sent.contains(id) == true else {
+                throw AutomationIssue(errorMessage ?? "截图尚未发送到 Mac，请重试。")
+            }
+            checkedID = id
+        }
+        if checkedID == nil {
+            throw AutomationIssue("相册中尚未发现配对后的新截图，请确认截图已存储到「照片」。")
+        }
+    }
+
+    private struct AutomationIssue: LocalizedError {
+        let errorDescription: String?
+        init(_ message: String) { errorDescription = message }
+    }
+
+    private func checkAutomationDestination(_ destination: Receiver) throws {
+        try Task.checkCancellation()
+        guard !changingReceiver, !sendingManually else { throw SyncIssue.syncBusy }
+        guard receiver == destination else { throw SyncIssue.receiverChanged }
+        guard history != nil else { throw SyncIssue.storage }
+        updatePhotoAccess(PHPhotoLibrary.authorizationStatus(for: .readWrite))
+        guard permission == .authorized else {
+            throw AutomationIssue("请在系统设置中允许即图完全访问照片，以读取刚保存的截图。")
         }
     }
 
     @discardableResult
     func scan(background: Bool = false) async -> Bool {
         guard !Task.isCancelled else { return false }
+        guard background || active else { return true }
         updatePhotoAccess(PHPhotoLibrary.authorizationStatus(for: .readWrite))
         guard !changingReceiver, !sendingManually, let receiver, history != nil,
               receiver.pairedAt == nil || (receiver.automatic && canReadPhotos) else { return true }
@@ -364,17 +524,16 @@ final class PhotoSync: ObservableObject {
         }
         working = true
         errorMessage = nil
-        defer {
-            runningScan = nil
-            working = false
-            if scanAgain {
-                scanAgain = false
-                libraryChanged()
-            }
-        }
-
         let operation = Task {
-            await runAutomatic(receiver, background: background)
+            defer {
+                runningScan = nil
+                working = false
+                if scanAgain {
+                    scanAgain = false
+                    scanWhileActive()
+                }
+            }
+            return await runAutomatic(receiver, background: background)
         }
         runningScan = operation
         return await withTaskCancellationHandler {
@@ -400,7 +559,7 @@ final class PhotoSync: ObservableObject {
         sendingManually = true
         defer {
             sendingManually = false
-            libraryChanged()
+            scanWhileActive()
         }
         await haltAutomaticWork()
 
@@ -420,6 +579,22 @@ final class PhotoSync: ObservableObject {
                 let assetID = item.itemIdentifier.map(Self.uploadID)
                 if let assetID, history?.sent.contains(assetID) == true {
                     result.alreadySent += 1
+                } else if item.isVideoSelection {
+                    guard let video = try await item.loadTransferable(type: SelectedVideo.self) else {
+                        throw SyncIssue.unavailableVideo
+                    }
+                    let id: String
+                    if let assetID { id = assetID }
+                    else { id = try await video.uploadID() }
+                    if history?.sent.contains(id) == true {
+                        result.alreadySent += 1
+                    } else {
+                        let name = Self.uploadFilename(id: id, timestamp: .now, extension: video.fileExtension)
+                        try Task.checkCancellation()
+                        try await ReceiverClient.send(video, named: name, id: id, to: verified)
+                        try recordDelivery(id, to: verified)
+                        result.sent += 1
+                    }
                 } else {
                     guard let image = try await item.loadTransferable(type: ScreenshotData.self) else {
                         throw SyncIssue.unavailableImage
@@ -455,7 +630,21 @@ final class PhotoSync: ObservableObject {
         verified.pairedAt = .now
         try ReceiverStore.save(verified)
         receiver = verified
+        registerDevice(with: verified)
         return verified
+    }
+
+    private func registerDevice(with receiver: Receiver, verifyAddress: Bool = false) {
+        registration?.cancel()
+        registration = Task {
+            do {
+                if verifyAddress { try await ReceiverClient.check(receiver) }
+                try await ReceiverClient.registerDevice(with: receiver)
+            } catch {
+                // A replaced pairing owns a new task. Only this pairing may schedule a retry.
+                if !Task.isCancelled { registration = nil }
+            }
+        }
     }
 
     private func cancelAutomaticWork() {
@@ -474,9 +663,17 @@ final class PhotoSync: ObservableObject {
 
     private func upload(_ image: ScreenshotData, id: String, timestamp: Date, to receiver: Receiver) async throws {
         try Task.checkCancellation()
-        let timestamp = Self.filenameFormatter.string(from: timestamp)
-        let filename = "iOS-\(timestamp)-\(id.suffix(8)).\(image.fileExtension)"
+        let filename = Self.uploadFilename(id: id, timestamp: timestamp, extension: image.fileExtension)
         try await ReceiverClient.send(image, named: filename, id: id, to: receiver)
+        try recordDelivery(id, to: receiver)
+    }
+
+    private static func uploadFilename(id: String, timestamp: Date, extension suffix: String) -> String {
+        let timestamp = Self.filenameFormatter.string(from: timestamp)
+        return "iOS-\(timestamp)-\(id.suffix(8)).\(suffix)"
+    }
+
+    private func recordDelivery(_ id: String, to receiver: Receiver) throws {
         guard self.receiver?.code == receiver.code, var history else { throw SyncIssue.receiverChanged }
         try history.markSent(id)
         self.history = history
@@ -515,27 +712,25 @@ final class PhotoSync: ObservableObject {
         }
         guard verified.automatic, canReadPhotos, let pairedAt = verified.pairedAt else { return true }
 
-        let screenshotPredicate = NSPredicate(
-            format: "(mediaSubtypes & %d) != 0", Int(PHAssetMediaSubtype.photoScreenshot.rawValue)
-        )
-        let options = PHFetchOptions()
-        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        options.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
-            screenshotPredicate, NSPredicate(format: "creationDate > %@", pairedAt as NSDate),
-        ])
-        let assets = PHAsset.fetchAssets(with: .image, options: options)
+        let assets = Self.screenshots(after: pairedAt)
 
+        var transferTime: ScreenshotTransferTime?
+        defer { transferTime?.end() }
         var attempts = 0
         let deadline = ContinuousClock.now + .seconds(12)
         for index in 0..<assets.count {
             if index.isMultiple(of: 64) { await Task.yield() }
             if Task.isCancelled { return false }
+            if !background && !active { break }
             if background && (attempts >= 5 || ContinuousClock.now >= deadline) { break }
             let asset = assets.object(at: index)
             guard let capturedAt = asset.creationDate, capturedAt > pairedAt else { continue }
             let id = Self.uploadID(asset.localIdentifier)
             guard history?.sent.contains(id) == false else { continue }
             attempts += 1
+            if !background, transferTime == nil, let runningScan {
+                transferTime = ScreenshotTransferTime(operation: runningScan)
+            }
 
             do {
                 let image = try await ScreenshotData.load(asset)
@@ -564,6 +759,17 @@ final class PhotoSync: ObservableObject {
 
         resetRetry()
         return !Task.isCancelled
+    }
+
+    private static func screenshots(after cutoff: Date, limit: Int = 0) -> PHFetchResult<PHAsset> {
+        let options = PHFetchOptions()
+        options.fetchLimit = limit
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        options.predicate = NSPredicate(
+            format: "(mediaSubtypes & %d) != 0 AND creationDate > %@",
+            Int(PHAssetMediaSubtype.photoScreenshot.rawValue), cutoff as NSDate
+        )
+        return PHAsset.fetchAssets(with: .image, options: options)
     }
 
     private func updateStats() {

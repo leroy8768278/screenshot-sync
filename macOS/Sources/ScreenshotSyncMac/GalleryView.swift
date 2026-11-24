@@ -3,7 +3,9 @@ import SwiftUI
 
 struct GalleryView: View {
     @ObservedObject var model: ReceiverModel
+    @ObservedObject var capture: LocalCaptureController
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.openWindow) private var openWindow
     @AppStorage("recentScreenshotSource") private var source: ScreenshotSource = .iOS
     @State private var showingUnclassified = false
     @State private var filters: [ScreenshotSource: DeviceFilter] = [:]
@@ -36,19 +38,21 @@ struct GalleryView: View {
     var body: some View {
         let images = activeImages
         let devices = activeSource.map(model.knownDevices(for:)) ?? []
-        let hasUnknown = images.contains { $0.device == nil }
+        let hasUnknown = activeSource != nil && activeSource != .mac && images.contains { model.recognizedDevice(for: $0) == nil }
         let filter = validFilter(devices: devices, hasUnknown: hasUnknown)
         let visible = images.filter { image in
             switch filter {
             case .all: true
-            case .device(let device): image.device == device
-            case .unknown: image.device == nil
+            case .device(let device): model.recognizedDevice(for: image) == device
+            case .unknown: model.recognizedDevice(for: image) == nil
             }
         }
 
         VStack(spacing: 0) {
             platformBar
-            if let activeSource {
+            if activeSource == .mac {
+                localCaptureBar
+            } else if let activeSource {
                 deviceBar(source: activeSource, devices: devices, hasUnknown: hasUnknown, filter: filter)
             }
             if case .failed(let reason) = model.status {
@@ -75,11 +79,38 @@ struct GalleryView: View {
         }
         .background(theme.page)
         .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
+            let status = ToolbarItem(placement: .primaryAction) {
                 ReceiverStatusLabel(status: model.status)
-                Button("连接") { sheet = .connection }
-                    .help("查看 Mac 地址、配对码和保存位置")
-                    .accessibilityIdentifier("gallery-connect")
+                    .fixedSize()
+                    .padding(.horizontal, 5)
+            }
+            if #available(macOS 26.0, *) {
+                status.sharedBackgroundVisibility(.hidden)
+            } else {
+                status
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    model.refreshRecent()
+                } label: {
+                    Label("刷新", systemImage: "arrow.clockwise")
+                }
+                .labelStyle(.iconOnly)
+                .keyboardShortcut("r", modifiers: .command)
+                .help("重新读取文件夹，移除已删除的媒体预览")
+                .accessibilityIdentifier("gallery-refresh")
+            }
+            if #available(macOS 26.0, *) {
+                ToolbarSpacer(.fixed, placement: .primaryAction)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button { sheet = .connection } label: {
+                    Label("扫码配对", systemImage: "qrcode")
+                }
+                .labelStyle(.titleAndIcon)
+                .buttonStyle(.borderedProminent)
+                .help("显示手机配对二维码、手动配对信息和保存位置")
+                .accessibilityIdentifier("gallery-connect")
             }
         }
         .sheet(item: $sheet) { item in
@@ -89,19 +120,24 @@ struct GalleryView: View {
             case .devices(let source):
                 DeviceManagerSheet(model: model, source: source)
             case .preview(let images, let index, let source):
-                ScreenshotPreviewSheet(images: images, index: index, source: source) { image in
+                ScreenshotPreviewSheet(model: model, images: images, index: index, source: source) { image in
                     [source?.label ?? "未归类", deviceLabel(for: image, source: source)]
                         .compactMap { $0 }.joined(separator: " · ")
                 }
             }
         }
         .onAppear(perform: model.refreshRecent)
+        .onChange(of: devices) { available in
+            if let activeSource, case .device(let selected) = filters[activeSource], !available.contains(selected) {
+                filters[activeSource] = .all
+            }
+        }
     }
 
     private var platformBar: some View {
         HStack(spacing: 5) {
             ForEach(ScreenshotSource.allCases, id: \.self) { platform in
-                GalleryTab(platform.label, selected: activeSource == platform, theme: theme) {
+                GalleryTab(platform == .mac ? "本机截图" : platform.label, selected: activeSource == platform, theme: theme) {
                     source = platform
                     showingUnclassified = false
                 }
@@ -121,22 +157,45 @@ struct GalleryView: View {
         .accessibilityLabel("平台来源")
     }
 
+    private var localCaptureBar: some View {
+        HStack(spacing: 12) {
+            Button(action: capture.start) {
+                Label("开始截图", systemImage: "viewfinder")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(capture.selecting)
+            .accessibilityIdentifier("local-capture-start")
+            Spacer()
+            Button {
+                openWindow(id: "local-capture-settings")
+            } label: {
+                Label("截图设置", systemImage: "gearshape")
+            }
+            .accessibilityIdentifier("local-capture-settings")
+        }
+        .padding(.horizontal, 23)
+        .padding(.vertical, 9)
+        .background(theme.subnavigation)
+        .overlay(alignment: .bottom) { Rectangle().fill(theme.border).frame(height: 1) }
+    }
+
     private func deviceBar(
         source: ScreenshotSource, devices: [ScreenshotDevice], hasUnknown: Bool, filter: DeviceFilter
     ) -> some View {
         HStack(spacing: 12) {
             ScrollView(.horizontal) {
                 HStack(spacing: 5) {
-                    GalleryTab("全部手机", selected: filter == .all, theme: theme, compact: true) {
+                    GalleryTab(ReceiverModel.allPicturesLabel, selected: filter == .all, theme: theme, compact: true) {
                         filters[source] = .all
                     }
                     .accessibilityIdentifier("device-all")
                     ForEach(devices) { device in
                         let name = model.name(for: device)
-                        GalleryTab(name, selected: filter == .device(device), theme: theme, compact: true) {
+                        let subtitle = model.subtitle(for: device)
+                        GalleryTab(name, selected: filter == .device(device), theme: theme, compact: true, subtitle: subtitle) {
                             filters[source] = .device(device)
                         }
-                        .help(name)
+                        .help([name, subtitle].compactMap { $0 }.joined(separator: " · "))
                         .accessibilityIdentifier("device-\(device.id)")
                     }
                     if hasUnknown {
@@ -163,13 +222,14 @@ struct GalleryView: View {
     }
 
     private func gallery(_ images: [ReceivedScreenshot]) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let mediaLabel = images.contains(where: \.isVideo) ? "图片和视频" : "截图"
+        return VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
-                Text(activeSource.map { "\($0.label) 截图" } ?? "未归类截图")
+                Text(activeSource == .mac ? "本机截图" : activeSource.map { "\($0.label) \(mediaLabel)" } ?? "未归类\(mediaLabel)")
                     .font(.system(size: 22, weight: .semibold))
                     .accessibilityAddTraits(.isHeader)
                 Spacer()
-                Text("\(images.count) 张")
+                Text(mediaLabel == "截图" ? "\(images.count) 张" : "\(images.count) 项")
                     .font(.callout.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
@@ -186,6 +246,10 @@ struct GalleryView: View {
                         .accessibilityHidden(true)
                     Text("还没有截图")
                         .font(.callout)
+                    if activeSource == .mac {
+                        Text("点击「开始截图」后拖选区域，按空格可选择窗口。")
+                            .font(.caption)
+                    }
                 }
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -228,8 +292,8 @@ struct GalleryView: View {
     }
 
     private func deviceLabel(for image: ReceivedScreenshot, source: ScreenshotSource?) -> String? {
-        guard source != nil else { return nil }
-        return image.device.map(model.name(for:)) ?? "未识别设备"
+        guard let source, source != .mac else { return nil }
+        return model.recognizedDevice(for: image).map(model.name(for:)) ?? "未识别设备"
     }
 }
 
@@ -238,27 +302,38 @@ private struct GalleryTab: View {
     let selected: Bool
     let theme: GalleryTheme
     var compact = false
+    let subtitle: String?
     let action: () -> Void
 
     @State private var hovering = false
 
-    init(_ title: String, selected: Bool, theme: GalleryTheme, compact: Bool = false, action: @escaping () -> Void) {
+    init(_ title: String, selected: Bool, theme: GalleryTheme, compact: Bool = false,
+         subtitle: String? = nil, action: @escaping () -> Void) {
         self.title = title
         self.selected = selected
         self.theme = theme
         self.compact = compact
+        self.subtitle = subtitle
         self.action = action
     }
 
     var body: some View {
         Button(action: action) {
-            Text(title)
-                .font(compact ? .callout : .body)
-                .fontWeight(selected ? .semibold : .regular)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(compact ? .callout : .body)
+                    .fontWeight(selected ? .semibold : .regular)
+                    .foregroundStyle(selected ? theme.accent : Color.primary)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
                 .lineLimit(1)
-                .foregroundStyle(selected ? theme.accent : Color.primary)
+                .frame(maxWidth: compact ? 180 : nil, alignment: .leading)
                 .padding(.horizontal, compact ? 10 : 14)
-                .frame(minHeight: compact ? 28 : 35)
+                .frame(minHeight: subtitle == nil ? (compact ? 28 : 35) : 39)
                 .background(selectionColor, in: RoundedRectangle(cornerRadius: 7))
                 .contentShape(Rectangle())
         }
@@ -288,6 +363,17 @@ private struct ScreenshotTile: View {
                     .padding(9)
                     .frame(height: 166)
                     .background(theme.mat(for: source))
+                    .overlay(alignment: .bottomTrailing) {
+                        if image.isVideo {
+                            Image(systemName: "play.fill")
+                                .font(.caption)
+                                .foregroundStyle(.white)
+                                .padding(7)
+                                .background(.black.opacity(0.65), in: Circle())
+                                .padding(8)
+                                .accessibilityHidden(true)
+                        }
+                    }
                 VStack(alignment: .leading, spacing: 3) {
                     Text(image.date.formatted(date: .abbreviated, time: .standard))
                         .font(.callout.weight(.semibold).monospacedDigit())
@@ -314,7 +400,7 @@ private struct ScreenshotTile: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .help(image.url.lastPathComponent)
-        .accessibilityLabel("预览截图")
+        .accessibilityLabel(image.isVideo ? "播放视频" : "预览截图")
         .accessibilityValue([deviceLabel, image.date.formatted(date: .abbreviated, time: .standard)]
             .compactMap { $0 }.joined(separator: "，"))
         .accessibilityIdentifier("gallery-image")
@@ -325,16 +411,15 @@ struct ReceiverStatusLabel: View {
     let status: ReceiverModel.Status
 
     var body: some View {
-        Label {
-            Text(status.isRunning ? "接收中" : status.label)
-        } icon: {
-            Image(systemName: "circle.fill")
-                .font(.system(size: 6))
+        HStack(spacing: 6) {
+            Circle()
+                .fill(tint)
+                .frame(width: 7, height: 7)
                 .accessibilityHidden(true)
+            Text(status.isRunning ? "接收中" : status.label)
+                .foregroundStyle(.secondary)
         }
-        .labelStyle(.titleAndIcon)
-        .font(.callout)
-        .foregroundStyle(tint)
+        .font(.callout.weight(.medium))
     }
 
     private var tint: Color {
@@ -363,6 +448,7 @@ struct GalleryTheme {
         case .iOS: color(0xdde8fc, 0x263b60)
         case .android: color(0xdceeea, 0x24463f)
         case .harmony: color(0xece6f6, 0x3a3051)
+        case .mac: color(0xe0e9f2, 0x293b4d)
         case nil: color(0xe6edf4, 0x29384b)
         }
     }

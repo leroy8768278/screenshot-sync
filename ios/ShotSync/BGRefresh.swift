@@ -8,7 +8,6 @@ enum BGRefresh {
 
     static func schedule() {
         let request = BGAppRefreshTaskRequest(identifier: identifier)
-        request.earliestBeginDate = .now.addingTimeInterval(15 * 60)
         do {
             try BGTaskScheduler.shared.submit(request)
         } catch {

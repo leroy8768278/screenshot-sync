@@ -1,6 +1,49 @@
+import { buffer } from '@kit.ArkTS';
+import { deviceInfo } from '@kit.BasicServicesKit';
 import { connection } from '@kit.NetworkKit';
 import { rcp } from '@kit.RemoteCommunicationKit';
-import { ImageFormat, RECEIVER_PORT } from './Protocol';
+import { MediaFormat, RECEIVER_PORT } from './Protocol';
+
+interface HealthResponse {
+  status: string;
+}
+
+interface DeviceInfo {
+  model?: string;
+  osVersion?: string;
+}
+
+function availableInfo(read: () => string, limit: number): string | undefined {
+  try {
+    const text: string = read().trim();
+    if (text.length > 0 && text.toLowerCase() !== 'unknown' &&
+      buffer.from(text, 'utf-8').length <= limit &&
+      !/(?![\u200C\u200D])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(text)) {
+      return text;
+    }
+  } catch (_error) {
+    // Individual device properties can be unavailable.
+  }
+  return undefined;
+}
+
+export async function findVerifiedHost(hosts: string[], token: string): Promise<string> {
+  let message = '无法连接到 Mac，请确认手机和 Mac 在同一局域网';
+  for (const host of hosts) {
+    const receiver = new Receiver(host, token);
+    try {
+      await receiver.verify();
+      return host;
+    } catch (error) {
+      if (error instanceof Error) {
+        message = error.message;
+      }
+    } finally {
+      receiver.close();
+    }
+  }
+  throw new Error(message);
+}
 
 export class Receiver {
   private session: rcp.Session;
@@ -26,21 +69,81 @@ export class Receiver {
     const request = new rcp.Request(this.baseURL + '/v1/health', 'GET', {
       'Authorization': this.authorization
     });
+    request.configuration = {
+      proxy: 'no-proxy',
+      transfer: { autoRedirect: false, timeout: { connectMs: 1500, transferMs: 2500 } }
+    };
     const response: rcp.Response = await this.fetch(request);
     if (response.statusCode !== 200) {
       this.failStatus(response.statusCode);
     }
+    const health = response.toJSON() as HealthResponse | null;
+    if (health?.status !== 'ok') {
+      throw new Error('此地址未返回即图接收端的配对响应');
+    }
   }
 
-  async upload(id: string, deviceId: string, filename: string, format: ImageFormat, image: ArrayBuffer): Promise<boolean> {
-    const request = new rcp.Request(this.baseURL + '/v1/screenshots', 'POST', {
+  static async reportDevice(host: string, token: string, deviceId: string): Promise<void> {
+    let receiver: Receiver | undefined;
+    try {
+      receiver = new Receiver(host, token);
+      const headers = receiver.deviceHeaders(deviceId);
+      headers['Content-Length'] = '0';
+      await receiver.fetch(new rcp.Request(receiver.baseURL + '/v1/devices', 'POST', headers));
+    } catch (_error) {
+      // The verified pairing remains usable when the optional announcement fails.
+    } finally {
+      receiver?.close();
+    }
+  }
+
+  private deviceHeaders(deviceId: string): Record<string, string> {
+    const headers: Record<string, string> = {
       'Authorization': this.authorization,
-      'X-Screenshot-ID': id,
       'X-Device-ID': deviceId,
-      'X-Filename': filename,
-      'Content-Type': format.mimeType,
-      'Content-Length': String(image.byteLength)
-    }, image);
+      'X-Device-Platform': 'harmony'
+    };
+    try {
+      const info: DeviceInfo = {
+        model: availableInfo((): string => deviceInfo.marketName, 256) ??
+          availableInfo((): string => deviceInfo.productModel, 256),
+        osVersion: availableInfo((): string => deviceInfo.distributionOSVersion, 128)
+      };
+      headers['X-Device-Info'] = buffer.from(JSON.stringify(info), 'utf-8').toString('base64');
+    } catch (_error) {
+      // A device without readable system metadata can still upload.
+    }
+    return headers;
+  }
+
+  async upload(id: string, deviceId: string, filename: string, format: MediaFormat, image: ArrayBuffer): Promise<boolean> {
+    return this.sendUpload(id, deviceId, filename, format, image, image.byteLength);
+  }
+
+  async uploadVideo(
+    id: string, deviceId: string, filename: string, format: MediaFormat, fd: number, length: number
+  ): Promise<boolean> {
+    return this.sendUpload(id, deviceId, filename, format, new rcp.UploadFromFile(fd), length);
+  }
+
+  private async sendUpload(
+    id: string, deviceId: string, filename: string, format: MediaFormat, content: rcp.RequestContent, length: number
+  ): Promise<boolean> {
+    const headers = this.deviceHeaders(deviceId);
+    headers['X-Screenshot-ID'] = id;
+    headers['X-Filename'] = filename;
+    headers['Content-Type'] = format.mimeType;
+    headers['Content-Length'] = String(length);
+    const request = new rcp.Request(this.baseURL + '/v1/screenshots', 'POST', headers, content);
+    if (format.mimeType.startsWith('video/')) {
+      request.configuration = {
+        proxy: 'no-proxy',
+        transfer: {
+          autoRedirect: false,
+          timeout: { connectMs: 4000, transferMs: 900000 }
+        }
+      };
+    }
     const response: rcp.Response = await this.fetch(request);
     switch (response.statusCode) {
       case 200:

@@ -6,6 +6,10 @@ android {
     namespace = "local.snapsync.android"
     compileSdk = 36
 
+    buildFeatures {
+        buildConfig = true
+    }
+
     defaultConfig {
         applicationId = "local.snapsync.android"
         minSdk = 29
@@ -22,4 +26,5 @@ android {
 
 dependencies {
     implementation("androidx.work:work-runtime:2.11.2")
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 }

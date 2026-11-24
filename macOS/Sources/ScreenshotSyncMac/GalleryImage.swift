@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
@@ -22,6 +23,13 @@ enum GalleryImage {
     private static var readOptions: CFDictionary { [kCGImageSourceShouldCache: false] as CFDictionary }
 
     static func decode(_ url: URL, maximumDimension: Int) async -> Decoded? {
+        if Inbox.Video(rawValue: url.pathExtension.lowercased()) != nil {
+            let generator = AVAssetImageGenerator(asset: Inbox.videoAsset(at: url))
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: maximumDimension, height: maximumDimension)
+            guard let frame = try? await generator.image(at: .zero) else { return nil }
+            return Decoded(image: frame.image, pixels: nil)
+        }
         let task = Task.detached(priority: .utility) { () -> Decoded? in
             guard !Task.isCancelled,
                   let source = CGImageSourceCreateWithURL(url as CFURL, readOptions),

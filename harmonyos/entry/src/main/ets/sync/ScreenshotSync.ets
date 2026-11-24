@@ -4,7 +4,7 @@ import { fileIo } from '@kit.CoreFileKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { loadPairing, Pairing } from './Pairing';
-import { ImageFormat, imageFormat, MAX_IMAGE_BYTES } from './Protocol';
+import { MediaFormat, imageFormat, MAX_IMAGE_BYTES } from './Protocol';
 import { Receiver } from './Receiver';
 
 export const GALLERY_PERMISSION: Permissions = 'ohos.permission.READ_IMAGEVIDEO';
@@ -49,7 +49,8 @@ export function isCurrentSync(context: common.Context, pairing: Pairing): boolea
 export async function syncScreenshots(
   context: common.Context,
   pairing: Pairing,
-  cancellation: SyncCancellation
+  cancellation: SyncCancellation,
+  sending?: () => void
 ): Promise<SyncResult> {
   const result = new SyncResult();
   const startedMs: number | undefined = pairing.pairedAfterMs;
@@ -85,7 +86,7 @@ export async function syncScreenshots(
   photoPredicates.equalTo(photoAccessHelper.PhotoKeys.PHOTO_TYPE, photoAccessHelper.PhotoType.IMAGE);
   photoPredicates.notEqualTo(photoAccessHelper.PhotoKeys.POSITION, photoAccessHelper.PositionType.CLOUD);
   photoPredicates.greaterThanOrEqualTo(photoAccessHelper.PhotoKeys.DATE_TAKEN, Math.floor(startedMs / 1000));
-  photoPredicates.orderByAsc(photoAccessHelper.PhotoKeys.DATE_TAKEN);
+  photoPredicates.orderByDesc(photoAccessHelper.PhotoKeys.DATE_TAKEN);
   const assets: photoAccessHelper.FetchResult<photoAccessHelper.PhotoAsset> = await album.getAssets({
     fetchColumns: [photoAccessHelper.PhotoKeys.DATE_TAKEN_MS, photoAccessHelper.PhotoKeys.DATE_ADDED_MS],
     predicates: photoPredicates
@@ -108,7 +109,7 @@ export async function syncScreenshots(
         continue;
       }
 
-      const format: ImageFormat | undefined = imageFormat(asset.displayName);
+      const format: MediaFormat | undefined = imageFormat(asset.displayName);
       if (!format) {
         result.skipped++;
         continue;
@@ -138,6 +139,7 @@ export async function syncScreenshots(
       if (!receiver) {
         receiver = new Receiver(pairing.host, pairing.token);
         cancellation.attach(receiver);
+        sending?.();
       }
       const alreadySent = await uploadImage(context, pairing, receiver, format, image,
         (): boolean => !cancellation.stopped && isCurrentSync(context, pairing));
@@ -172,14 +174,14 @@ export function assetReceipt(context: common.Context, pairing: Pairing, uri: str
   return undefined;
 }
 
-function markReceipt(path: string): void {
+export function markReceipt(path: string): void {
   const marker: fileIo.File = fileIo.openSync(path, fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY);
   fileIo.closeSync(marker);
 }
 
 /** Returns true for a prior delivery, false for a new delivery, and undefined on cancellation or rejection. */
 export async function uploadImage(
-  context: common.Context, pairing: Pairing, receiver: Receiver, format: ImageFormat, data: ArrayBuffer,
+  context: common.Context, pairing: Pairing, receiver: Receiver, format: MediaFormat, data: ArrayBuffer,
   current: () => boolean
 ): Promise<boolean | undefined> {
   const hash: cryptoFramework.Md = cryptoFramework.createMd('SHA256');

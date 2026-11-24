@@ -11,6 +11,7 @@ import java.util.UUID;
 
 final class SyncSettings {
     static final String STATUS = "status";
+    static final String LIVE_ENABLED = "live_enabled";
     static final int PORT = 43871;
     private static final String HOST = "host";
     private static final String CODE = "code";
@@ -52,6 +53,14 @@ final class SyncSettings {
         return context.getSharedPreferences("sync_settings", Context.MODE_PRIVATE);
     }
 
+    static boolean liveEnabled(Context context) {
+        return preferences(context).getBoolean(LIVE_ENABLED, false);
+    }
+
+    static void setLiveEnabled(Context context, boolean enabled) {
+        preferences(context).edit().putBoolean(LIVE_ENABLED, enabled).apply();
+    }
+
     static Pairing read(Context context) {
         synchronized (SETTINGS_LOCK) {
             SharedPreferences prefs = preferences(context);
@@ -70,7 +79,7 @@ final class SyncSettings {
         synchronized (SETTINGS_LOCK) {
             Pairing old = read(context);
             boolean sameReceiver = old.isConfigured() && old.code.equals(code);
-            boolean paused = sameReceiver && old.paused;
+            boolean paused = (old.isVerified() || sameReceiver) && old.paused;
             long cutoff = sameReceiver && old.isVerified() ? old.connectedAt : verifiedAt;
             String installation = old.installation.isEmpty()
                 ? UUID.randomUUID().toString() : old.installation;

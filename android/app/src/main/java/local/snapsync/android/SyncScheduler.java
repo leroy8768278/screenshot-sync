@@ -27,17 +27,13 @@ final class SyncScheduler {
 
     static void configure(Context context, SyncSettings.Pairing pairing) {
         WorkManager manager = WorkManager.getInstance(context);
-        if (!pairing.canSync() || PhotoAccess.current(context) != PhotoAccess.FULL) {
+        if (!ScreenshotScan.canRun(context, pairing)) {
             cancelAutomatic(manager);
             return;
         }
 
-        NetworkRequest lan = new NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-            .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
-            .build();
         Constraints constraints = new Constraints.Builder()
-            .setRequiredNetworkRequest(lan, NetworkType.CONNECTED)
+            .setRequiredNetworkRequest(localNetwork(), NetworkType.CONNECTED)
             .build();
         PeriodicWorkRequest request = new PeriodicWorkRequest.Builder(
             ScreenshotWorker.class, 15, TimeUnit.MINUTES)
@@ -49,7 +45,7 @@ final class SyncScheduler {
     }
 
     static void sync(Context context, SyncSettings.Pairing pairing) {
-        if (!pairing.canSync() || PhotoAccess.current(context) != PhotoAccess.FULL) {
+        if (!ScreenshotScan.canRun(context, pairing)) {
             return;
         }
         OneTimeWorkRequest request = new OneTimeWorkRequest.Builder(ScreenshotWorker.class)
@@ -59,6 +55,13 @@ final class SyncScheduler {
         WorkManager.getInstance(context).enqueueUniqueWork(
             FOREGROUND_WORK, ExistingWorkPolicy.APPEND_OR_REPLACE, request
         );
+    }
+
+    static NetworkRequest localNetwork() {
+        return new NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+            .build();
     }
 
     private static Data input(SyncSettings.Pairing pairing) {

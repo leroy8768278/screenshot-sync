@@ -18,22 +18,27 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
 
-final class ImageTransfer {
+final class MediaTransfer {
     static final int ALREADY_SENT = -1;
     // A picker URI and a MediaStore item may refer to the same bytes. Serialize the
     // receipt check and upload so both send paths cannot commit it at the same time.
-    private static final ReentrantLock DELIVERY = new ReentrantLock(true);
+    private static final ReentrantLock IMAGE_DELIVERY = new ReentrantLock(true);
+    // A long manual video upload can run alongside live screenshot sync.
+    private static final ReentrantLock VIDEO_DELIVERY = new ReentrantLock(true);
 
     static int send(Context context, SyncSettings.Pairing pairing, ReceiverConnection receiver,
                     DeliveryReceipts receipts, Uri uri, String screenshotId, String filename,
                     String type, CancellationSignal readCancellation, BooleanSupplier cancelled) throws IOException {
-        Path staged = Files.createTempFile(context.getCacheDir().toPath(), "selected-image-", ".tmp");
+        boolean video = type.startsWith("video/");
+        long maxBytes = video ? ReceiverConnection.MAX_VIDEO_BYTES : ReceiverConnection.MAX_BYTES;
+        ReentrantLock delivery = video ? VIDEO_DELIVERY : IMAGE_DELIVERY;
+        Path staged = Files.createTempFile(context.getCacheDir().toPath(), "selected-media-", ".tmp");
         try {
-            String contentId = stage(context, uri, pairing, readCancellation, cancelled, staged);
+            String contentId = stage(context, uri, pairing, readCancellation, cancelled, staged, maxBytes);
             if (contentId == null) {
                 return 413;
             }
-            while (!tryLock()) {
+            while (!tryLock(delivery)) {
                 checkCancelled(cancelled);
             }
             try {
@@ -62,7 +67,7 @@ final class ImageTransfer {
                 }
                 return status;
             } finally {
-                DELIVERY.unlock();
+                delivery.unlock();
             }
         } finally {
             Files.deleteIfExists(staged);
@@ -71,15 +76,15 @@ final class ImageTransfer {
 
     private static String stage(Context context, Uri uri, SyncSettings.Pairing pairing,
                                 CancellationSignal readCancellation, BooleanSupplier cancelled,
-                                Path staged) throws IOException {
+                                Path staged, long maxBytes) throws IOException {
         checkCancelled(cancelled);
         AssetFileDescriptor descriptor = context.getContentResolver().openAssetFileDescriptor(uri, "r", readCancellation);
         if (descriptor == null) {
-            throw new FileNotFoundException("Image is no longer available");
+            throw new FileNotFoundException("Media is no longer available");
         }
         MessageDigest digest = sha256();
         try (descriptor) {
-            if (descriptor.getLength() > ReceiverConnection.MAX_BYTES) {
+            if (descriptor.getLength() > maxBytes) {
                 return null;
             }
             long length = 0;
@@ -89,7 +94,7 @@ final class ImageTransfer {
                 while ((count = input.read(buffer)) != -1) {
                     checkCancelled(cancelled);
                     length += count;
-                    if (length > ReceiverConnection.MAX_BYTES) {
+                    if (length > maxBytes) {
                         return null;
                     }
                     digest.update(buffer, 0, count);
@@ -97,7 +102,7 @@ final class ImageTransfer {
                 }
             }
             if (length == 0) {
-                throw new IOException("Empty image");
+                throw new FileNotFoundException("Empty media");
             }
         }
         return "android-" + SyncSettings.digest(pairing.installation() + ":content:" + SyncSettings.bytesToHex(digest.digest()));
@@ -111,9 +116,9 @@ final class ImageTransfer {
         }
     }
 
-    private static boolean tryLock() {
+    private static boolean tryLock(ReentrantLock delivery) {
         try {
-            return DELIVERY.tryLock(100, TimeUnit.MILLISECONDS);
+            return delivery.tryLock(100, TimeUnit.MILLISECONDS);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw new OperationCanceledException();
@@ -126,5 +131,5 @@ final class ImageTransfer {
         }
     }
 
-    private ImageTransfer() {}
+    private MediaTransfer() {}
 }

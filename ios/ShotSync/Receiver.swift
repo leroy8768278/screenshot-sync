@@ -52,46 +52,145 @@ struct Receiver: Codable, Equatable {
     }
 }
 
+private struct PairingCode: Decodable {
+    let type: String
+    let version: Int
+    let token: String
+    let addresses: [String]
+
+    static func receivers(in text: String) throws -> [Receiver] {
+        guard text.utf8.count <= 4096,
+              let pairing = try? JSONDecoder().decode(Self.self, from: Data(text.utf8)),
+              pairing.type == "snaprelay-pair", pairing.version == 1,
+              pairing.token.utf8.count == 24, (1...16).contains(pairing.addresses.count)
+        else { throw SyncIssue.invalidPairingQR }
+
+        var receivers = [Receiver]()
+        for address in pairing.addresses {
+            guard address.hasPrefix("http://") else { throw SyncIssue.invalidPairingQR }
+            var endpoint = address.dropFirst("http://".count)
+            if endpoint.last == "/" { endpoint.removeLast() }
+            let fields = endpoint.split(separator: ":", omittingEmptySubsequences: false)
+            guard fields.count == 2, fields[1] == "43871",
+                  fields[0].utf8.allSatisfy({ $0 == 46 || (48...57).contains($0) }),
+                  !fields[0].hasPrefix("127."),
+                  let receiver = try? Receiver(address: String(fields[0]), port: "43871", code: pairing.token, automatic: true)
+            else { throw SyncIssue.invalidPairingQR }
+            if !receivers.contains(receiver) { receivers.append(receiver) }
+        }
+        return receivers
+    }
+}
+
 final class ReceiverClient: NSObject, URLSessionTaskDelegate {
-    private static let session: URLSession = {
+    private static let session = makeSession(requestTimeout: 8, resourceTimeout: 20)
+    private static let videoSession = makeSession(requestTimeout: 25, resourceTimeout: 600)
+
+    private static func makeSession(requestTimeout: TimeInterval, resourceTimeout: TimeInterval) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.allowsCellularAccess = false
         configuration.httpShouldSetCookies = false
         configuration.urlCache = nil
-        configuration.timeoutIntervalForRequest = 8
-        configuration.timeoutIntervalForResource = 20
+        configuration.timeoutIntervalForRequest = requestTimeout
+        configuration.timeoutIntervalForResource = resourceTimeout
         configuration.connectionProxyDictionary = [
             "HTTPEnable": 0, "HTTPSEnable": 0, "SOCKSEnable": 0,
             "ProxyAutoConfigEnable": 0, "ProxyAutoDiscoveryEnable": 0,
         ]
         return URLSession(configuration: configuration, delegate: ReceiverClient(), delegateQueue: nil)
-    }()
+    }
 
     static func check(_ receiver: Receiver) async throws {
+        struct Health: Decodable { let status: String }
         let (data, response) = try await session.data(for: receiver.request(path: "/v1/health"))
         try validate(response)
-        guard let body = try? JSONDecoder().decode([String: String].self, from: data),
-              body["status"] == "ok" else { throw SyncIssue.invalidResponse }
+        guard (response as? HTTPURLResponse)?.statusCode == 200,
+              let body = try? JSONDecoder().decode(Health.self, from: data),
+              body.status == "ok" else { throw SyncIssue.invalidResponse }
+    }
+
+    static func verifiedReceiver(in qr: String) async throws -> Receiver {
+        let candidates = try PairingCode.receivers(in: qr)
+        return try await withThrowingTaskGroup(of: Result<Receiver, Error>.self) { group in
+            var remaining = candidates.makeIterator()
+            var lastError: Error = URLError(.cannotConnectToHost)
+            func probe(_ candidate: Receiver) async -> Result<Receiver, Error> {
+                do {
+                    try await check(candidate)
+                    return .success(candidate)
+                } catch { return .failure(error) }
+            }
+            for _ in 0..<min(3, candidates.count) {
+                if let candidate = remaining.next() { group.addTask { await probe(candidate) } }
+            }
+            while let outcome = try await group.next() {
+                try Task.checkCancellation()
+                switch outcome {
+                case .success(let receiver):
+                    group.cancelAll()
+                    return receiver
+                case .failure(let error):
+                    if error is SyncIssue || lastError is URLError { lastError = error }
+                    if let candidate = remaining.next() { group.addTask { await probe(candidate) } }
+                }
+            }
+            throw lastError
+        }
+    }
+
+    @MainActor
+    private static func deviceRequest(_ receiver: Receiver, path: String) -> URLRequest {
+        var request = receiver.request(path: path)
+        request.httpMethod = "POST"
+        request.setValue(InstallationIdentity.deviceID, forHTTPHeaderField: "X-Device-ID")
+        request.setValue("ios", forHTTPHeaderField: "X-Device-Platform")
+        let info = try? JSONEncoder().encode(DeviceInfo())
+        request.setValue(info?.base64EncodedString(), forHTTPHeaderField: "X-Device-Info")
+        return request
+    }
+
+    @MainActor
+    static func registerDevice(with receiver: Receiver) async throws {
+        try Task.checkCancellation()
+        guard receiver.pairedAt != nil else { return }
+        var request = deviceRequest(receiver, path: "/v1/devices")
+        request.setValue("0", forHTTPHeaderField: "Content-Length")
+        let (_, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw SyncIssue.invalidResponse }
+        switch http.statusCode {
+        case 200..<300, 404, 405: return  // Older receivers can still accept media.
+        default: throw SyncIssue.httpStatus(http.statusCode)
+        }
     }
 
     static func send(_ image: ScreenshotData, named filename: String, id: String, to receiver: Receiver) async throws {
-        var request = receiver.request(path: "/v1/screenshots")
-        request.httpMethod = "POST"
-        request.setValue(image.mimeType, forHTTPHeaderField: "Content-Type")
-        request.setValue(id, forHTTPHeaderField: "X-Screenshot-ID")
-        request.setValue(InstallationIdentity.deviceID, forHTTPHeaderField: "X-Device-ID")
-        request.setValue(filename, forHTTPHeaderField: "X-Filename")
+        let request = await uploadRequest(mimeType: image.mimeType, filename: filename, id: id, receiver: receiver)
         let (_, response) = try await session.upload(for: request, from: image.bytes)
         try validate(response)
     }
 
-    private static func validate(_ response: URLResponse) throws {
+    static func send(_ video: SelectedVideo, named filename: String, id: String, to receiver: Receiver) async throws {
+        let request = await uploadRequest(mimeType: video.mimeType, filename: filename, id: id, receiver: receiver)
+        let (_, response) = try await videoSession.upload(for: request, fromFile: video.file)
+        try validate(response, video: true)
+    }
+
+    @MainActor
+    private static func uploadRequest(mimeType: String, filename: String, id: String, receiver: Receiver) -> URLRequest {
+        var request = deviceRequest(receiver, path: "/v1/screenshots")
+        request.setValue(mimeType, forHTTPHeaderField: "Content-Type")
+        request.setValue(id, forHTTPHeaderField: "X-Screenshot-ID")
+        request.setValue(filename, forHTTPHeaderField: "X-Filename")
+        return request
+    }
+
+    private static func validate(_ response: URLResponse, video: Bool = false) throws {
         guard let response = response as? HTTPURLResponse else { throw SyncIssue.invalidResponse }
         switch response.statusCode {
         case 200, 201: return
         case 401, 403: throw SyncIssue.accessDenied
-        case 413: throw SyncIssue.imageTooLarge
-        case 415, 422: throw SyncIssue.unsupportedImage
+        case 413: throw video ? SyncIssue.videoTooLarge : SyncIssue.imageTooLarge
+        case 415, 422: throw video ? SyncIssue.unsupportedVideo : SyncIssue.unsupportedImage
         default: throw SyncIssue.httpStatus(response.statusCode)
         }
     }
@@ -220,8 +319,9 @@ func digest(_ data: Data) -> String {
 func digest(_ value: String) -> String { digest(Data(value.utf8)) }
 
 enum SyncIssue: LocalizedError {
-    case invalidAddress, invalidPort, invalidCode, invalidResponse, accessDenied
-    case imageTooLarge, unsupportedImage, unavailableImage, storage, syncBusy, receiverChanged
+    case invalidAddress, invalidPort, invalidCode, invalidResponse, accessDenied, invalidPairingQR
+    case imageTooLarge, unsupportedImage, unavailableImage, videoTooLarge, unsupportedVideo, unavailableVideo
+    case storage, syncBusy, receiverChanged
     case httpStatus(Int)
 
     var errorDescription: String? {
@@ -229,14 +329,18 @@ enum SyncIssue: LocalizedError {
         case .invalidAddress: "请输入 Mac 显示的局域网 IPv4 地址，例如 192.168.1.25。"
         case .invalidPort: "请输入 1 到 65535 之间的端口号。"
         case .invalidCode: "请输入 Mac 显示的 24 位配对码。"
+        case .invalidPairingQR: "无法识别配对码。请扫描 Mac 端即图在「扫码配对」中显示的二维码。"
         case .invalidResponse: "Mac 返回了无法识别的响应。"
         case .accessDenied: "配对码无效，请核对 Mac 上的配对码。"
         case .imageTooLarge: "图片超过 64 MB，无法发送。"
         case .unsupportedImage: "图片格式无法发送。"
         case .unavailableImage: "无法读取图片。请确认已下载到手机后重试。"
+        case .videoTooLarge: "视频超过 512 MiB，无法发送。"
+        case .unsupportedVideo: "无法发送此视频。支持 MP4、MOV 和 M4V。"
+        case .unavailableVideo: "无法读取视频。请确认已下载到手机后重试。"
         case .storage: "无法访问本机同步设置，请解锁手机后重试。"
         case .syncBusy: "正在处理另一次连接或手动发送，请稍后重试。"
-        case .receiverChanged: "Mac 连接已变更，请重新选图。"
+        case .receiverChanged: "Mac 连接已变更，请重新选择要发送的项目。"
         case .httpStatus(let status): "Mac 返回了 HTTP \(status)。"
         }
     }

@@ -1,15 +1,26 @@
-import { abilityAccessCtrl, common } from '@kit.AbilityKit';
+import { abilityAccessCtrl, bundleManager, common } from '@kit.AbilityKit';
+import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { clearPairing, createPairing, loadPairing, Pairing, savePairing, withSyncEnabled } from '../sync/Pairing';
-import { ManualResult, SelectedPhoto, selectPhotos, sendSelection } from '../sync/ManualSync';
-import { isPairingCode, parseReceiverHost, RECEIVER_PORT } from '../sync/Protocol';
-import { Receiver } from '../sync/Receiver';
+import { ManualResult, SelectedMedia, selectMedia, sendSelection } from '../sync/ManualSync';
+import { isPairingCode, PairingTarget, parseReceiverHost, RECEIVER_PORT } from '../sync/Protocol';
+import { findVerifiedHost, Receiver } from '../sync/Receiver';
+import { scanPairing } from '../sync/ScanPairing';
 import { GALLERY_PERMISSION, galleryAllowed, syncScreenshots, SyncCancellation, SyncResult } from '../sync/ScreenshotSync';
 import { updateSchedule } from '../work/Schedule';
 
 const BLUE: string = '#2359D7';
 const INK: string = '#162444';
 const MUTED: string = '#475975';
+
+function versionLabel(): string {
+  try {
+    const info = bundleManager.getBundleInfoForSelfSync(bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+    return info.versionName ? `  v${info.versionName}` : '';
+  } catch (_error) {
+    return '';
+  }
+}
 
 @Entry
 @Component
@@ -24,11 +35,12 @@ struct Index {
   @State private showSettings: boolean = false;
   @State private galleryGranted: boolean = false;
   @State private changingSettings: boolean = false;
+  @State private pairingStatus: string = '';
   @State private uploading: boolean = false;
   @State private status: string = '等待配对';
   @State private scheduleStatus: string = '';
   @State private selecting: boolean = false;
-  @State private selection: SelectedPhoto[] = [];
+  @State private selection: SelectedMedia[] = [];
   @State private manualSending: boolean = false;
   @State private manualStatus: string = '';
 
@@ -37,23 +49,24 @@ struct Index {
   }
 
   private pairing: Pairing | undefined;
+  private readonly version: string = versionLabel();
   private helper: photoAccessHelper.PhotoAccessHelper | undefined;
   private interval: number = -1;
-  private debounce: number = -1;
+  private scanAgain: boolean = false;
+  private backgroundDelayId: number | undefined;
   private activeSync: SyncCancellation | undefined;
   private activeManual: SyncCancellation | undefined;
   private manualTarget: Pairing | undefined;
   private scheduleUpdate: Promise<void> = Promise.resolve();
   private pageReady: boolean = false;
 
-  private onPhotoChange = (_change: photoAccessHelper.PhotoAssetChangeInfos): void => {
-    if (this.debounce !== -1) {
-      clearTimeout(this.debounce);
+  private onPhotoChange = (change: photoAccessHelper.PhotoAssetChangeInfos): void => {
+    if (change.isForRecheck || !change.assetChangeDatas || change.assetChangeDatas.some(
+      (asset: photoAccessHelper.PhotoAssetChangeData): boolean =>
+        asset.assetAfterChange?.mediaType === photoAccessHelper.PhotoType.IMAGE
+    )) {
+      this.sync(true);
     }
-    this.debounce = setTimeout((): void => {
-      this.debounce = -1;
-      this.sync();
-    }, 1200);
   };
 
   aboutToAppear(): void {
@@ -95,14 +108,18 @@ struct Index {
   }
 
   private foregroundChanged(): void {
-    if (!this.pageReady || !this.foreground) {
-      this.stopListening();
+    if (!this.pageReady) {
+      return;
+    }
+    if (!this.foreground) {
+      // Keep the observer available for notifications delivered before the process is suspended.
+      this.stopForegroundPolling();
       return;
     }
     this.refreshPermission();
     const saved: Pairing | undefined = this.pairing;
     if (saved && saved.pairedAfterMs === undefined) {
-      this.verifyConnection(saved.host, saved.token);
+      this.connect(false, saved);
       return;
     }
     this.startListening();
@@ -123,13 +140,17 @@ struct Index {
   }
 
   private startListening(): void {
-    if (!this.foreground || !this.syncEnabled || !this.galleryGranted || this.pairing?.pairedAfterMs === undefined ||
-      this.interval !== -1) {
+    if (!this.foreground || !this.syncEnabled || !this.galleryGranted || this.pairing?.pairedAfterMs === undefined) {
       return;
     }
-    this.interval = setInterval((): void => {
-      this.sync();
-    }, 30_000);
+    if (this.interval === -1) {
+      this.interval = setInterval((): void => {
+        this.sync();
+      }, 30_000);
+    }
+    if (this.helper) {
+      return;
+    }
     try {
       const helper: photoAccessHelper.PhotoAccessHelper = photoAccessHelper.getPhotoAccessHelper(this.getContext());
       helper.on('photoChange', this.onPhotoChange);
@@ -139,18 +160,53 @@ struct Index {
     }
   }
 
-  private stopListening(): void {
-    this.activeSync?.stop();
-    this.activeSync = undefined;
-    this.uploading = false;
+  private stopForegroundPolling(): void {
     if (this.interval !== -1) {
       clearInterval(this.interval);
       this.interval = -1;
     }
-    if (this.debounce !== -1) {
-      clearTimeout(this.debounce);
-      this.debounce = -1;
+  }
+
+  private prepareBackgroundContinuation(cancellation: SyncCancellation): void {
+    if (!this.foreground || this.activeSync !== cancellation || this.backgroundDelayId !== undefined) {
+      return;
     }
+    try {
+      const delay = backgroundTaskManager.requestSuspendDelay('完成正在发送的截图', (): void => {
+        if (this.activeSync === cancellation && this.backgroundDelayId === delay.requestId) {
+          this.releaseBackgroundDelay();
+          if (!this.foreground) {
+            this.scanAgain = false;
+            cancellation.stop();
+          }
+        }
+      });
+      this.backgroundDelayId = delay.requestId;
+    } catch (_error) {
+      // The transfer can proceed while the system still allows execution.
+    }
+  }
+
+  private releaseBackgroundDelay(): void {
+    const id = this.backgroundDelayId;
+    if (id === undefined) {
+      return;
+    }
+    this.backgroundDelayId = undefined;
+    try {
+      backgroundTaskManager.cancelSuspendDelay(id);
+    } catch (_error) {
+      // The system may already have ended the transient task.
+    }
+  }
+
+  private stopListening(): void {
+    this.activeSync?.stop();
+    this.activeSync = undefined;
+    this.uploading = false;
+    this.scanAgain = false;
+    this.releaseBackgroundDelay();
+    this.stopForegroundPolling();
     try {
       this.helper?.off('photoChange', this.onPhotoChange);
     } catch (_error) {
@@ -196,58 +252,71 @@ struct Index {
     }
   }
 
-  private async connect(): Promise<void> {
-    if (this.changingSettings || this.manualSending || this.selecting) {
-      return;
-    }
-    const host: string | undefined = parseReceiverHost(this.host);
-    const token: string = this.token.trim().toLowerCase();
+  private manualTargetFromFields(): PairingTarget {
+    const host = parseReceiverHost(this.host);
+    const token = this.token.trim().toLowerCase();
     if (!host) {
-      this.status = '请输入 Mac 接收端显示的局域网 IPv4 地址';
-      return;
+      throw new Error('请输入 Mac 接收端显示的局域网 IPv4 地址');
     }
     if (!isPairingCode(token)) {
-      this.status = '请输入 Mac 接收端显示的 24 位配对码';
-      return;
+      throw new Error('请输入 Mac 接收端显示的 24 位配对码');
     }
-    await this.verifyConnection(host, token);
+    return new PairingTarget([host], token);
   }
 
-  private async verifyConnection(host: string, token: string): Promise<void> {
+  private async connect(useScanner: boolean = false, saved?: Pairing): Promise<void> {
     if (this.changingSettings || this.manualSending || this.selecting) {
       return;
     }
     this.changingSettings = true;
-    this.status = '正在连接 Mac…';
-    let receiver: Receiver | undefined;
+    this.pairingStatus = '';
     try {
-      receiver = new Receiver(host, token);
-      await receiver.verify();
       const context: common.UIAbilityContext = this.getContext();
-      const pairing: Pairing = createPairing(context, host, token, Date.now(), this.pairing);
-      savePairing(this.getContext(), pairing);
+      let target: PairingTarget | undefined;
+      if (useScanner) {
+        target = await scanPairing(context);
+      } else if (saved) {
+        target = new PairingTarget([saved.host], saved.token);
+      } else {
+        target = this.manualTargetFromFields();
+      }
+      if (!target || !this.pageReady) {
+        return;
+      }
+      this.pairingStatus = '正在验证 Mac…';
+      const host = await findVerifiedHost(target.hosts, target.token);
+      if (!this.pageReady) {
+        return;
+      }
+      const pairing: Pairing = createPairing(context, host, target.token, Date.now(), this.pairing);
+      savePairing(context, pairing);
+      Receiver.reportDevice(pairing.host, pairing.token, pairing.installation);
       this.stopListening();
       if (this.manualTarget && (this.manualTarget.destination !== pairing.destination ||
         this.manualTarget.host !== pairing.host)) {
         this.clearSelection();
-        this.manualStatus = 'Mac 接收端已更改，请重新选图';
+        this.manualStatus = 'Mac 接收端已更改，请重新选择图片或视频';
       }
       this.applyPairing(pairing);
       this.host = host;
-      this.token = token;
+      this.token = target.token;
+      this.pairingStatus = '';
       this.showSettings = false;
       this.refreshPermission();
       this.status = pairing.enabled && !this.galleryGranted ? '允许访问相册后可自动同步' : 'Mac 已连接';
       await this.refreshSchedule();
       this.startListening();
     } catch (error) {
-      this.status = error instanceof Error ? error.message : '配对失败，请检查 Mac 接收端';
-      return;
+      this.pairingStatus = error instanceof Error ? error.message : '配对失败，请检查 Mac 接收端';
+      if (saved) {
+        this.status = this.pairingStatus;
+      }
     } finally {
-      receiver?.close();
       this.changingSettings = false;
+      if (this.pairing?.pairedAfterMs !== undefined) {
+        this.sync();
+      }
     }
-    this.sync();
   }
 
   private async disconnect(): Promise<void> {
@@ -266,6 +335,7 @@ struct Index {
       this.cutoffLabel = '';
       this.token = '';
       this.showSettings = false;
+      this.pairingStatus = '';
       this.status = '已断开 Mac';
       this.manualStatus = '';
       await this.refreshSchedule();
@@ -311,7 +381,7 @@ struct Index {
         this.pairing?.pairedAfterMs !== undefined ? this.pairing.revision : undefined;
       try {
         await updateSchedule(this.getContext().abilityInfo.bundleName, revision);
-        this.scheduleStatus = revision !== undefined ? '后台补传由系统择机执行。' : '';
+        this.scheduleStatus = revision !== undefined ? '相册变化时立即检查。应用挂起后由系统安排补传。' : '';
       } catch (_error) {
         this.scheduleStatus = revision !== undefined ? '后台补传未能注册，打开应用时仍会同步。' : '';
       }
@@ -319,13 +389,17 @@ struct Index {
     return this.scheduleUpdate;
   }
 
-  private async sync(): Promise<void> {
+  private async sync(fromPhotoChange: boolean = false): Promise<void> {
     const pairing: Pairing | undefined = this.pairing;
-    if (!pairing?.enabled || !this.foreground || this.uploading || this.changingSettings) {
+    if (!this.pageReady || !pairing?.enabled || (!this.foreground && !fromPhotoChange) || this.changingSettings) {
+      return;
+    }
+    if (this.uploading) {
+      this.scanAgain = true;
       return;
     }
     if (pairing.pairedAfterMs === undefined) {
-      this.verifyConnection(pairing.host, pairing.token);
+      this.connect(false, pairing);
       return;
     }
     this.refreshPermission();
@@ -340,7 +414,9 @@ struct Index {
     this.uploading = true;
     this.status = '正在检查系统截图…';
     try {
-      const result: SyncResult = await syncScreenshots(this.getContext(), pairing, cancellation);
+      const result: SyncResult = await syncScreenshots(this.getContext(), pairing, cancellation, (): void => {
+        this.prepareBackgroundContinuation(cancellation);
+      });
       if (this.activeSync === cancellation) {
         if (result.skipped > 0) {
           this.status = `本次同步 ${result.uploaded} 张，${result.skipped} 张暂未处理`;
@@ -358,12 +434,18 @@ struct Index {
       if (this.activeSync === cancellation) {
         this.activeSync = undefined;
         this.uploading = false;
+        this.releaseBackgroundDelay();
+        const repeat = this.scanAgain;
+        this.scanAgain = false;
+        if (repeat) {
+          this.sync(true);
+        }
       }
     }
   }
 
   private clearSelection(): void {
-    const selection: SelectedPhoto[] = this.selection;
+    const selection: SelectedMedia[] = this.selection;
     this.selection = [];
     this.manualTarget = undefined;
     for (const item of selection) {
@@ -371,7 +453,7 @@ struct Index {
     }
   }
 
-  private async pickImages(): Promise<void> {
+  private async pickMedia(): Promise<void> {
     const pairing: Pairing | undefined = this.pairing;
     if (!pairing || this.selecting || this.manualSending || this.changingSettings) {
       return;
@@ -379,7 +461,7 @@ struct Index {
     this.selecting = true;
     this.manualStatus = '';
     try {
-      const picked: SelectedPhoto[] = await selectPhotos(this.getContext(), pairing);
+      const picked: SelectedMedia[] = await selectMedia(this.getContext(), pairing);
       if (!this.pageReady || this.pairing?.destination !== pairing.destination || this.pairing?.host !== pairing.host) {
         for (const item of picked) {
           item.thumbnail?.release().catch((): void => {});
@@ -398,7 +480,7 @@ struct Index {
     }
   }
 
-  private async sendImages(): Promise<void> {
+  private async sendMedia(): Promise<void> {
     const target: Pairing | undefined = this.manualTarget;
     if (!target || this.manualSending || this.selection.length === 0 || this.changingSettings) {
       return;
@@ -413,7 +495,7 @@ struct Index {
         return;
       }
       const completed = new Set(result.completed);
-      this.selection = this.selection.filter((item: SelectedPhoto): boolean => {
+      this.selection = this.selection.filter((item: SelectedMedia): boolean => {
         if (!completed.has(item.uri)) {
           return true;
         }
@@ -422,12 +504,12 @@ struct Index {
       });
       if (this.selection.length === 0) {
         this.manualTarget = undefined;
-        this.manualStatus = `已同步 ${completed.size} 张图片`;
+        this.manualStatus = `已同步 ${completed.size} 项媒体`;
       } else if (cancellation.stopped) {
-        this.manualStatus = `已取消本次发送，剩余 ${this.selection.length} 张可重试`;
+        this.manualStatus = `已取消本次发送，剩余 ${this.selection.length} 项可重试`;
       } else {
         const message: string = result.error || '请检查 Mac 接收端后重试';
-        this.manualStatus = `剩余 ${this.selection.length} 张。${message}`;
+        this.manualStatus = `剩余 ${this.selection.length} 项。${message}`;
       }
     } finally {
       if (this.activeManual === cancellation) {
@@ -437,14 +519,34 @@ struct Index {
     }
   }
 
+  @Builder
+  private pairingScanner() {
+    Button(this.hasPairing ? '扫码更换 Mac' : '扫一扫配对')
+      .width('100%')
+      .backgroundColor(this.hasPairing ? '#EAF0FF' : BLUE)
+      .fontColor(this.hasPairing ? INK : '#FFFFFF')
+      .enabled(!this.changingSettings && !this.manualSending && !this.selecting)
+      .onClick(() => { this.connect(true); })
+    if (this.pairingStatus.length > 0) {
+      Text(this.pairingStatus)
+        .fontSize(14)
+        .fontColor(INK)
+    }
+  }
+
   build() {
     Scroll() {
       Column({ space: 18 }) {
         Column({ space: 7 }) {
-          Text($r('app.string.app_name'))
-            .fontSize(34)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(INK)
+          Text() {
+            Span($r('app.string.app_name'))
+              .fontSize(34)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(INK)
+            Span(this.version)
+              .fontSize(15)
+              .fontColor(MUTED)
+          }
           Text($r('app.string.module_description'))
             .fontSize(15)
             .fontColor(MUTED)
@@ -466,6 +568,9 @@ struct Index {
             Text(`Mac · ${this.activeHost}:${RECEIVER_PORT}`)
               .fontSize(14)
               .fontColor(MUTED)
+            if (!this.showSettings) {
+              this.pairingScanner()
+            }
             if (this.cutoffLabel.length > 0) {
               Text(`自动同步起点 · ${this.cutoffLabel}`)
                 .fontSize(14)
@@ -503,11 +608,11 @@ struct Index {
         .borderRadius(22)
 
         if (this.hasPairing) {
-          Button(this.selecting ? '正在选择图片…' : '手动选图')
+          Button(this.selecting ? '正在选择媒体…' : '手动选图或视频')
             .width('100%')
             .backgroundColor(BLUE)
             .enabled(!this.manualSending && !this.selecting && !this.changingSettings)
-            .onClick(() => { this.pickImages(); })
+            .onClick(() => { this.pickMedia(); })
 
           if (this.selection.length > 0) {
             Column({ space: 10 }) {
@@ -515,31 +620,42 @@ struct Index {
                 .fontSize(20)
                 .fontWeight(FontWeight.Bold)
                 .fontColor(INK)
-              Text(`将 ${this.selection.length} 张图片发送到 Mac · ${this.activeHost}:${RECEIVER_PORT}`)
+              Text(`将 ${this.selection.length} 项媒体发送到 Mac · ${this.activeHost}:${RECEIVER_PORT}`)
                 .fontSize(14)
                 .fontColor(MUTED)
               Scroll() {
                 Row({ space: 8 }) {
-                  ForEach(this.selection, (item: SelectedPhoto) => {
-                    if (item.thumbnail) {
-                      Image(item.thumbnail)
-                        .objectFit(ImageFit.Cover)
-                        .width(76)
-                        .height(76)
-                        .borderRadius(8)
-                        .accessibilityText(item.name || '选中的图片')
-                    } else {
-                      Text(item.name || '选中的图片')
-                        .fontSize(11)
-                        .fontColor(MUTED)
-                        .textAlign(TextAlign.Center)
-                        .maxLines(3)
-                        .width(76)
-                        .height(76)
-                        .backgroundColor('#EAF0FF')
-                        .borderRadius(8)
+                  ForEach(this.selection, (item: SelectedMedia) => {
+                    Stack({ alignContent: Alignment.BottomEnd }) {
+                      if (item.thumbnail) {
+                        Image(item.thumbnail)
+                          .objectFit(ImageFit.Cover)
+                          .width(76)
+                          .height(76)
+                          .borderRadius(8)
+                          .accessibilityText(item.name || (item.isVideo ? '选中的视频' : '选中的图片'))
+                        if (item.isVideo) {
+                          Text('视频')
+                            .fontSize(10)
+                            .fontColor('#FFFFFF')
+                            .backgroundColor(INK)
+                            .padding({ left: 4, right: 4, top: 2, bottom: 2 })
+                            .borderRadius(4)
+                            .margin(4)
+                        }
+                      } else {
+                        Text(item.name || (item.isVideo ? '选中的视频' : '选中的图片'))
+                          .fontSize(11)
+                          .fontColor(MUTED)
+                          .textAlign(TextAlign.Center)
+                          .maxLines(3)
+                          .width(76)
+                          .height(76)
+                          .backgroundColor('#EAF0FF')
+                          .borderRadius(8)
+                      }
                     }
-                  }, (item: SelectedPhoto): string => item.uri)
+                  }, (item: SelectedMedia): string => item.uri)
                 }
               }
               .scrollable(ScrollDirection.Horizontal)
@@ -551,10 +667,10 @@ struct Index {
                   .onClick(() => { this.activeManual?.stop(); })
               } else {
                 Row({ space: 8 }) {
-                  Button(`发送 ${this.selection.length} 张`)
+                  Button(`发送 ${this.selection.length} 项`)
                     .backgroundColor(BLUE)
                     .enabled(!this.changingSettings && !this.selecting)
-                    .onClick(() => { this.sendImages(); })
+                    .onClick(() => { this.sendMedia(); })
                   Button('返回')
                     .backgroundColor('#EAF0FF')
                     .fontColor(INK)
@@ -588,7 +704,11 @@ struct Index {
               .fontSize(20)
               .fontWeight(FontWeight.Bold)
               .fontColor(INK)
-            Text('打开 Mac 接收端，填写它显示的地址和配对码。')
+            Text('在 Mac 上点「扫码配对」显示二维码。')
+              .fontSize(14)
+              .fontColor(MUTED)
+            this.pairingScanner()
+            Text('也可以手动输入 Mac 上显示的地址和配对码。')
               .fontSize(14)
               .fontColor(MUTED)
             Text('Mac 局域网地址')
@@ -615,7 +735,8 @@ struct Index {
               .onChange((value: string) => { this.token = value; })
             Button(this.hasPairing ? '验证并保存' : '连接 Mac')
               .width('100%')
-              .backgroundColor(BLUE)
+              .backgroundColor('#EAF0FF')
+              .fontColor(INK)
               .fontSize(16)
               .fontWeight(FontWeight.Medium)
               .enabled(!this.changingSettings && !this.manualSending && !this.selecting)

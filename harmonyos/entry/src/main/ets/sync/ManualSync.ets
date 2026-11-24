@@ -1,17 +1,19 @@
 import { common } from '@kit.AbilityKit';
 import { dataSharePredicates } from '@kit.ArkData';
 import { fileIo } from '@kit.CoreFileKit';
+import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { image } from '@kit.ImageKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { loadPairing, Pairing } from './Pairing';
-import { ImageFormat, imageFormat } from './Protocol';
+import { imageFormat, MediaFormat, MAX_VIDEO_BYTES, videoFormat } from './Protocol';
 import { Receiver } from './Receiver';
-import { assetReceipt, galleryAllowed, readImage, SyncCancellation, uploadImage } from './ScreenshotSync';
+import { assetReceipt, galleryAllowed, markReceipt, readImage, SyncCancellation, uploadImage } from './ScreenshotSync';
 
-export class SelectedPhoto {
+export class SelectedMedia {
   constructor(
     public uri: string,
     public name: string,
+    public isVideo: boolean,
     public thumbnail?: image.PixelMap,
     public receipt?: string
   ) {}
@@ -22,13 +24,13 @@ export class ManualResult {
   error: string = '';
 }
 
-export async function selectPhotos(context: common.Context, pairing: Pairing): Promise<SelectedPhoto[]> {
+export async function selectMedia(context: common.Context, pairing: Pairing): Promise<SelectedMedia[]> {
   const options = new photoAccessHelper.PhotoSelectOptions();
-  options.MIMEType = photoAccessHelper.PhotoViewMIMETypes.IMAGE_TYPE;
+  options.MIMEType = photoAccessHelper.PhotoViewMIMETypes.IMAGE_VIDEO_TYPE;
   options.maxSelectNumber = 30;
   const picker = new photoAccessHelper.PhotoViewPicker();
   const selection: photoAccessHelper.PhotoSelectResult = await picker.select(options);
-  const result: SelectedPhoto[] = [];
+  const result: SelectedMedia[] = [];
   if (selection.photoUris.length === 0) {
     return result;
   }
@@ -37,7 +39,8 @@ export async function selectPhotos(context: common.Context, pairing: Pairing): P
   for (const uri of new Set(selection.photoUris)) {
     const predicates = new dataSharePredicates.DataSharePredicates();
     predicates.equalTo(photoAccessHelper.PhotoKeys.URI, uri);
-    const selected = new SelectedPhoto(uri, uri.split('/').pop() ?? '');
+    const name: string = uri.split('/').pop() ?? '';
+    const selected = new SelectedMedia(uri, name, videoFormat(name) !== undefined);
     let assets: photoAccessHelper.FetchResult<photoAccessHelper.PhotoAsset> | undefined;
     try {
       assets = await helper.getAssets({
@@ -47,7 +50,8 @@ export async function selectPhotos(context: common.Context, pairing: Pairing): P
       if (assets.getCount() > 0) {
         const asset: photoAccessHelper.PhotoAsset = await assets.getFirstObject();
         selected.name = asset.displayName;
-        if (canReadGallery) {
+        selected.isVideo = asset.photoType === photoAccessHelper.PhotoType.VIDEO;
+        if (canReadGallery && !selected.isVideo) {
           selected.receipt = assetReceipt(context, pairing, asset.uri, asset.get(photoAccessHelper.PhotoKeys.DATE_ADDED_MS));
         }
         selected.thumbnail = await asset.getThumbnail({ width: 224, height: 224 });
@@ -63,7 +67,7 @@ export async function selectPhotos(context: common.Context, pairing: Pairing): P
 }
 
 export async function sendSelection(
-  context: common.Context, pairing: Pairing, selection: SelectedPhoto[], cancellation: SyncCancellation
+  context: common.Context, pairing: Pairing, selection: SelectedMedia[], cancellation: SyncCancellation
 ): Promise<ManualResult> {
   const result = new ManualResult();
   let receiver: Receiver | undefined;
@@ -75,6 +79,26 @@ export async function sendSelection(
     for (const item of selection) {
       if (!isCurrent()) {
         break;
+      }
+      const video: MediaFormat | undefined = videoFormat(item.name);
+      if (item.isVideo || video !== undefined) {
+        if (!video) {
+          result.error = '视频仅支持 MP4、MOV 或 M4V 格式';
+          continue;
+        }
+        if (!receiver) {
+          receiver = new Receiver(pairing.host, pairing.token);
+          cancellation.attach(receiver);
+        }
+        const error: string | undefined = await sendVideo(context, pairing, receiver, item.uri, video, isCurrent);
+        if (error === undefined) {
+          result.completed.push(item.uri);
+        } else if (!isCurrent()) {
+          break;
+        } else {
+          result.error = error;
+        }
+        continue;
       }
       if (item.receipt && fileIo.accessSync(item.receipt)) {
         result.completed.push(item.uri);
@@ -92,7 +116,7 @@ export async function sendSelection(
         result.error = '有图片无法读取或超过 64 MiB';
         continue;
       }
-      const format: ImageFormat | undefined = imageFormat(item.name) ?? identifyImage(bytes);
+      const format: MediaFormat | undefined = imageFormat(item.name) ?? identifyImage(bytes);
       if (!format) {
         result.error = '有图片的格式暂不支持';
         continue;
@@ -123,7 +147,68 @@ export async function sendSelection(
   return result;
 }
 
-function identifyImage(data: ArrayBuffer): ImageFormat | undefined {
+async function sendVideo(
+  context: common.Context, pairing: Pairing, receiver: Receiver, uri: string, format: MediaFormat,
+  isCurrent: () => boolean
+): Promise<string | undefined> {
+  let file: fileIo.File | undefined;
+  try {
+    let size: number;
+    let hex: string;
+    try {
+      // Keep the picker-granted descriptor open until the native HTTP upload has finished.
+      file = fileIo.openSync(uri, fileIo.OpenMode.READ_ONLY);
+      size = (await fileIo.stat(file.fd)).size;
+      if (!Number.isSafeInteger(size) || size <= 0 || size > MAX_VIDEO_BYTES) {
+        return '视频为空或超过 512 MiB';
+      }
+      hex = await videoFingerprint(file.fd, size, isCurrent);
+      fileIo.lseek(file.fd, 0);
+    } catch (_error) {
+      return '无法读取已选视频';
+    }
+    if (!isCurrent()) {
+      return '同步已停止';
+    }
+    const id: string = `harmony-${pairing.installation}-video-${hex}`;
+    const receipt: string = `${context.getApplicationContext().filesDir}/sent-${pairing.destination}-${id}`;
+    if (fileIo.accessSync(receipt)) {
+      return undefined;
+    }
+    const filename: string = `Video-${hex.slice(0, 12)}.${format.extension}`;
+    if (!(await receiver.uploadVideo(id, pairing.installation, filename, format, file.fd, size))) {
+      return 'Mac 无法保存该视频，请确认接收端已更新且支持该格式';
+    }
+    markReceipt(receipt);
+    return undefined;
+  } finally {
+    if (file) {
+      await fileIo.close(file);
+    }
+  }
+}
+
+async function videoFingerprint(fd: number, size: number, isCurrent: () => boolean): Promise<string> {
+  const hash: cryptoFramework.Md = cryptoFramework.createMd('SHA256');
+  const chunk = new ArrayBuffer(Math.min(256 * 1024, size));
+  let offset: number = 0;
+  while (offset < size) {
+    if (!isCurrent()) {
+      throw new Error('同步已停止');
+    }
+    const length: number = Math.min(chunk.byteLength, size - offset);
+    const read: number = await fileIo.read(fd, chunk, { length: length });
+    if (read <= 0) {
+      throw new Error('视频读取中断');
+    }
+    await hash.update({ data: new Uint8Array(chunk, 0, read) });
+    offset += read;
+  }
+  const digest: cryptoFramework.DataBlob = await hash.digest();
+  return Array.from(digest.data, (byte: number): string => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function identifyImage(data: ArrayBuffer): MediaFormat | undefined {
   if (data.byteLength < 12) {
     return undefined;
   }

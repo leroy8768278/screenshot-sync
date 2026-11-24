@@ -1,17 +1,21 @@
+import AVFoundation
 import CryptoKit
 import Foundation
 import ImageIO
+import UniformTypeIdentifiers
 
 enum ScreenshotSource: String, CaseIterable, Sendable {
     case iOS = "ios"
     case android
     case harmony
+    case mac
 
     var label: String {
         switch self {
         case .iOS: "iOS"
         case .android: "Android"
         case .harmony: "鸿蒙"
+        case .mac: "本机"
         }
     }
 
@@ -19,6 +23,7 @@ enum ScreenshotSource: String, CaseIterable, Sendable {
         let parts = uploadID.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
         guard parts.count == 2, !parts[1].isEmpty else { return nil }
         self.init(rawValue: String(parts[0]))
+        guard self != .mac else { return nil }
     }
 }
 
@@ -29,7 +34,7 @@ struct ScreenshotDevice: Hashable, Identifiable, Sendable {
     var id: String { "\(source.rawValue):\(installationID)" }
 
     init?(source: ScreenshotSource, installationID: String) {
-        guard Self.isDeviceID(installationID) else { return nil }
+        guard source != .mac, Self.isDeviceID(installationID) else { return nil }
         self.source = source
         self.installationID = installationID
     }
@@ -52,6 +57,7 @@ struct ReceivedScreenshot: Identifiable, Sendable {
     let device: ScreenshotDevice?
 
     var id: URL { url }
+    var isVideo: Bool { Inbox.Video(rawValue: url.pathExtension.lowercased()) != nil }
 }
 
 enum Inbox {
@@ -87,12 +93,26 @@ enum Inbox {
         "com.microsoft.bmp": "bmp"
     ]
 
-    private static let imageExtensions = Set(supportedTypes.values).union(["jpeg", "tif"])
+    enum Video: String, CaseIterable, Sendable {
+        case mp4, mov, m4v
+
+        init?(contentType: String) {
+            switch contentType {
+            case "video/mp4": self = .mp4
+            case "video/quicktime": self = .mov
+            case "video/x-m4v", "video/m4v": self = .m4v
+            default: return nil
+            }
+        }
+    }
+
+    private static let mediaExtensions = Set(supportedTypes.values)
+        .union(["jpeg", "tif"]).union(Video.allCases.map(\.rawValue))
 
     static func contains(_ name: FileName, in folder: URL) -> Bool {
         let stems = name.stem == name.legacyStem ? [name.stem] : [name.stem, name.legacyStem]
         return stems.contains { stem in
-            supportedTypes.values.contains { suffix in
+            mediaExtensions.contains { suffix in
                 FileManager.default.fileExists(atPath: folder.appendingPathComponent("\(stem).\(suffix)").path)
             }
         }
@@ -116,7 +136,7 @@ enum Inbox {
         var screenshots: [ScreenshotSource?: [ReceivedScreenshot]] = [:]
         for url in files {
             guard url.lastPathComponent.hasPrefix(filePrefix),
-                  imageExtensions.contains(url.pathExtension.lowercased()),
+                  mediaExtensions.contains(url.pathExtension.lowercased()),
                   let info = try? url.resourceValues(forKeys: keys), info.isRegularFile == true,
                   let date = info.contentModificationDate, let bytes = info.fileSize else { continue }
             let stem = url.deletingPathExtension().lastPathComponent
@@ -162,6 +182,20 @@ enum Inbox {
         return ScreenshotDevice(source: source, installationID: installationID)
     }
 
+    static func saveLocalScreenshot(_ image: CGImage, in folder: URL) throws {
+        let manager = FileManager.default
+        try manager.createDirectory(at: folder, withIntermediateDirectories: true)
+        let id = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        let staging = folder.appendingPathComponent(".screenshotsync-local-\(id)")
+        let target = folder.appendingPathComponent("\(filePrefix)mac-\(id).png")
+        defer { try? manager.removeItem(at: staging) }
+        guard let destination = CGImageDestinationCreateWithURL(staging as CFURL, UTType.png.identifier as CFString, 1, nil)
+        else { throw CocoaError(.fileWriteUnknown) }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else { throw CocoaError(.fileWriteUnknown) }
+        try manager.moveItem(at: staging, to: target)
+    }
+
     static func save(staged: URL, name: FileName, device: ScreenshotDevice?, in folder: URL) throws -> Bool {
         if contains(name, in: folder) { return false }
         guard let image = CGImageSourceCreateWithURL(staged as CFURL, nil),
@@ -171,6 +205,29 @@ enum Inbox {
               CGImageSourceGetStatusAtIndex(image, 0) == .statusComplete else {
             throw SaveError.invalidImage
         }
+        return try publish(staged: staged, name: name, device: device, suffix: suffix, in: folder)
+    }
+
+    static func playableVideo(at url: URL) async -> Bool {
+        let asset = videoAsset(at: url)
+        do {
+            guard try await asset.load(.isPlayable) else { return false }
+            return try await !asset.loadTracks(withMediaType: .video).isEmpty
+        } catch {
+            return false
+        }
+    }
+
+    static func videoAsset(at url: URL) -> AVURLAsset {
+        AVURLAsset(url: url, options: [
+            AVURLAssetReferenceRestrictionsKey: AVAssetReferenceRestrictions.forbidAll.rawValue
+        ])
+    }
+
+    static func publish(
+        staged: URL, name: FileName, device: ScreenshotDevice?, suffix: String, in folder: URL
+    ) throws -> Bool {
+        if contains(name, in: folder) { return false }
         let directory = originDirectory(in: folder)
         let origin = directory.appendingPathComponent(name.stem)
         let manager = FileManager.default
@@ -183,7 +240,7 @@ enum Inbox {
             try manager.removeItem(at: origin)
         }
         do {
-            // Publish the image only after its origin is ready for readers.
+            // Publish the media file only after its origin is ready for readers.
             try manager.moveItem(at: staged, to: folder.appendingPathComponent("\(name.stem).\(suffix)"))
         } catch {
             if device != nil && !contains(name, in: folder) { try? manager.removeItem(at: origin) }

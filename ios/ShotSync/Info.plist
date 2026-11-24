@@ -22,12 +22,14 @@
     <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
+    <key>NSCameraUsageDescription</key>
+    <string>扫描 Mac 上的即图二维码，配对这台设备。</string>
     <key>NSPhotoLibraryUsageDescription</key>
     <string>识别配对后截取的新截图并自动发送到你的 Mac。</string>
     <key>NSPhotoLibraryPreventAutomaticLimitedAccessAlert</key>
     <true/>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>连接局域网内配对的 Mac，发送新截图和手动选择的图片。</string>
+    <string>连接局域网内配对的 Mac，发送新截图和手动选择的照片及视频。</string>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key>

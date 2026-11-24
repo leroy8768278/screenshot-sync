@@ -1,4 +1,5 @@
 "CFBundleDisplayName" = "即图";
 "CFBundleName" = "即图";
 "NSPhotoLibraryUsageDescription" = "识别配对后截取的新截图并自动发送到你的 Mac。";
-"NSLocalNetworkUsageDescription" = "连接局域网内配对的 Mac，发送新截图和手动选择的图片。";
+"NSLocalNetworkUsageDescription" = "连接局域网内配对的 Mac，发送新截图和手动选择的照片及视频。";
+"NSCameraUsageDescription" = "扫描 Mac 上的即图二维码，配对这台设备。";
