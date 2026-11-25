@@ -71,6 +71,13 @@ private struct SyncHome: View {
                                 .foregroundStyle(.primary)
                         }
 
+                        if receiver.pairedAt != nil {
+                            DeviceConversation(receiver: receiver)
+                                .id(receiver.historyKey + receiver.displayAddress)
+                        }
+                    }
+
+                    Section {
                         scanButton
 
                         if receiver.automatic {

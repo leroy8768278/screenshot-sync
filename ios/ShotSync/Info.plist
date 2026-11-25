@@ -29,7 +29,7 @@
     <key>NSPhotoLibraryPreventAutomaticLimitedAccessAlert</key>
     <true/>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>连接局域网内配对的 Mac，发送新截图和手动选择的照片及视频。</string>
+    <string>连接已配对的 Mac，同步截图和选中的照片、视频，并在设备对话中收发文字和文件。</string>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key>

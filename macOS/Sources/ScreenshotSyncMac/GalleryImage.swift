@@ -45,42 +45,35 @@ enum GalleryImage {
 
     @MainActor
     static func copy(_ url: URL, to pasteboard: NSPasteboard = .general) async throws {
-        let representations = try await Task.detached(priority: .userInitiated) {
-            try copyRepresentations(for: url)
-        }.value
-        try Task.checkCancellation()
-
-        let item = NSPasteboardItem()
-        for representation in representations {
-            guard item.setData(representation.data, forType: .init(representation.type)) else {
-                throw ImageError.copyFailed
-            }
-        }
-        pasteboard.clearContents()
-        guard pasteboard.writeObjects([item]) else { throw ImageError.copyFailed }
+        try await beginCopy(url, to: pasteboard).finish()
     }
 
-    private static func copyRepresentations(for url: URL) throws -> [Representation] {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, readOptions),
+    @MainActor
+    static func beginCopy(_ url: URL, to pasteboard: NSPasteboard = .general) throws -> ImageClipboardRequest {
+        let bytes = try Data(contentsOf: url, options: .mappedIfSafe)
+        guard let source = CGImageSourceCreateWithData(bytes as CFData, readOptions),
               let identifier = CGImageSourceGetType(source) as String?,
               let type = UTType(identifier), type.conforms(to: .image),
               CGImageSourceGetStatusAtIndex(source, index(of: source)) == .statusComplete else {
             throw ImageError.unreadable
         }
-        let original = Representation(type: identifier, data: try Data(contentsOf: url, options: .mappedIfSafe))
-        if type == .png { return [original] }
-
-        // Keep the original representation and offer PNG to apps that only read common image types.
-        guard let size = dimensions(of: source),
-              size.width <= 64_000_000 / max(1, size.height),
-              let image = thumbnail(source, maximumDimension: max(size.width, size.height)),
-              let mutable = CFDataCreateMutable(nil, 0),
-              let destination = CGImageDestinationCreateWithData(mutable, UTType.png.identifier as CFString, 1, nil) else {
-            return [original]
+        let original = Representation(type: identifier, data: bytes)
+        let originalType = NSPasteboard.PasteboardType(identifier)
+        guard type != .png, let size = dimensions(of: source),
+              size.width <= 64_000_000 / max(1, size.height) else {
+            return try ImageClipboardRequest(types: [originalType], to: pasteboard) { [original] }
         }
-        CGImageDestinationAddImage(destination, image, nil)
-        guard CGImageDestinationFinalize(destination) else { return [original] }
-        return [Representation(type: UTType.png.identifier, data: mutable as Data), original]
+        return try ImageClipboardRequest(types: [.png, originalType], to: pasteboard) {
+            guard let source = CGImageSourceCreateWithData(bytes as CFData, readOptions),
+                  let image = thumbnail(source, maximumDimension: max(size.width, size.height)),
+                  let mutable = CFDataCreateMutable(nil, 0),
+                  let destination = CGImageDestinationCreateWithData(mutable, UTType.png.identifier as CFString, 1, nil) else {
+                return [original]
+            }
+            CGImageDestinationAddImage(destination, image, nil)
+            guard CGImageDestinationFinalize(destination) else { return [original] }
+            return [Representation(type: UTType.png.identifier, data: mutable as Data), original]
+        }
     }
 
     private static func thumbnail(_ source: CGImageSource, maximumDimension: Int) -> CGImage? {

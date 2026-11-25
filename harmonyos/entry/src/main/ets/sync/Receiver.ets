@@ -2,6 +2,7 @@ import { buffer } from '@kit.ArkTS';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { connection } from '@kit.NetworkKit';
 import { rcp } from '@kit.RemoteCommunicationKit';
+import { ChatMessage, ChatPage, MAX_CHAT_FILE, MAX_CHAT_TEXT } from './ChatTypes';
 import { MediaFormat, RECEIVER_PORT } from './Protocol';
 
 interface HealthResponse {
@@ -155,6 +156,81 @@ export class Receiver {
         return false;
       default:
         return this.failStatus(response.statusCode);
+    }
+  }
+
+  private chatHeaders(device: string, key: string): Record<string, string> {
+    const headers: Record<string, string> = this.deviceHeaders(device);
+    headers['X-Chat-Key'] = key;
+    return headers;
+  }
+
+  async chatPage(device: string, key: string, after: number): Promise<ChatPage> {
+    const request = new rcp.Request(this.baseURL + '/v1/chat/messages?after=' + after, 'GET',
+      this.chatHeaders(device, key));
+    const response = await this.fetch(request);
+    if (response.statusCode !== 200) {
+      this.failStatus(response.statusCode);
+    }
+    const page = response.toJSON() as ChatPage | null;
+    if (!page || !Array.isArray(page.messages) || typeof page.hasMore !== 'boolean' || typeof page.macName !== 'string') {
+      throw new Error('无法读取对话记录');
+    }
+    let previous: number = after;
+    for (const message of page.messages) {
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(message.id) ||
+        !Number.isSafeInteger(message.sequence) || message.sequence <= previous || !Number.isFinite(message.createdAt) ||
+        (message.sender !== 'mac' && message.sender !== 'phone') ||
+        (message.kind !== 'text' && message.kind !== 'file') ||
+        !Number.isSafeInteger(message.bytes) || message.bytes < 0 ||
+        (message.kind === 'file' && (message.bytes > MAX_CHAT_FILE || typeof message.filename !== 'string' ||
+          !message.filename || message.filename === '.' || message.filename === '..' ||
+          /[\/\\:\u0000-\u001F\u007F]/.test(message.filename))) ||
+        (message.kind === 'text' && (message.bytes > MAX_CHAT_TEXT || typeof message.text !== 'string'))) {
+        throw new Error('对话记录格式无效');
+      }
+      previous = message.sequence;
+    }
+    if (page.hasMore && page.messages.length === 0) {
+      throw new Error('对话记录分页无效');
+    }
+    return page;
+  }
+
+  async sendChat(device: string, key: string, id: string, content: rcp.RequestContent,
+    bytes: number, filename?: string): Promise<void> {
+    const headers = this.chatHeaders(device, key);
+    headers['X-Message-ID'] = id;
+    headers['Content-Length'] = String(bytes);
+    headers['Content-Type'] = filename === undefined ? 'text/plain; charset=utf-8' : 'application/octet-stream';
+    if (filename !== undefined) {
+      headers['X-File-Name'] = buffer.from(filename, 'utf-8').toString('base64');
+    }
+    const route = filename === undefined ? '/v1/chat/text' : '/v1/chat/file';
+    const request = new rcp.Request(this.baseURL + route, 'POST', headers, content);
+    request.configuration = {
+      proxy: 'no-proxy', transfer: { autoRedirect: false, timeout: { connectMs: 4000, transferMs: 600000 } }
+    };
+    const response = await this.fetch(request);
+    if (response.statusCode !== 200 && response.statusCode !== 201) {
+      this.failStatus(response.statusCode);
+    }
+    const saved = response.toJSON() as ChatMessage | null;
+    if (!saved || typeof saved.id !== 'string' || saved.id.toLowerCase() !== id.toLowerCase()) {
+      throw new Error('未收到发送确认，请重试');
+    }
+  }
+
+  async downloadChat(device: string, key: string, id: string, path: string): Promise<void> {
+    const destination: rcp.DownloadToFile = { kind: 'file', file: path };
+    const request = new rcp.Request(this.baseURL + '/v1/chat/files/' + id, 'GET', this.chatHeaders(device, key));
+    request.destination = destination;
+    request.configuration = {
+      proxy: 'no-proxy', transfer: { autoRedirect: false, timeout: { connectMs: 4000, transferMs: 600000 } }
+    };
+    const response = await this.fetch(request);
+    if (response.statusCode !== 200) {
+      this.failStatus(response.statusCode);
     }
   }
 

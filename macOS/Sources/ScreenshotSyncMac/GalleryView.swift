@@ -10,6 +10,9 @@ struct GalleryView: View {
     @State private var showingUnclassified = false
     @State private var filters: [ScreenshotSource: DeviceFilter] = [:]
     @State private var sheet: GallerySheet?
+    @State private var cleanupPlan: Inbox.ImageCleanupPlan?
+    @State private var showingCleanupConfirmation = false
+    @State private var cleanupBusy = false
 
     private enum DeviceFilter: Equatable {
         case all
@@ -75,6 +78,13 @@ struct GalleryView: View {
                 .padding(.horizontal, 23)
                 .padding(.vertical, 8)
             }
+            if case .device(let device) = filter {
+                DeviceConversationView(room: model.conversation(for: device),
+                                       deviceName: model.name(for: device), theme: theme)
+                    .id(device)
+                    .padding(.horizontal, 23)
+                    .padding(.top, 14)
+            }
             gallery(visible)
         }
         .background(theme.page)
@@ -90,15 +100,16 @@ struct GalleryView: View {
                 status
             }
             ToolbarItem(placement: .primaryAction) {
-                Button {
-                    model.refreshRecent()
-                } label: {
-                    Label("刷新", systemImage: "arrow.clockwise")
-                }
-                .labelStyle(.iconOnly)
-                .keyboardShortcut("r", modifiers: .command)
-                .help("重新读取文件夹，移除已删除的媒体预览")
-                .accessibilityIdentifier("gallery-refresh")
+                Button("刷新", action: model.refreshRecent)
+                    .keyboardShortcut("r", modifiers: .command)
+                    .help("重新读取文件夹，移除已删除的媒体预览")
+                    .accessibilityIdentifier("gallery-refresh")
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button("清除全部图片…", action: prepareImageCleanup)
+                    .disabled(cleanupBusy || showingCleanupConfirmation)
+                    .help("将传图文件夹中所有来源的图片移到废纸篓")
+                    .accessibilityIdentifier("gallery-clear-images")
             }
             if #available(macOS 26.0, *) {
                 ToolbarSpacer(.fixed, placement: .primaryAction)
@@ -127,9 +138,66 @@ struct GalleryView: View {
             }
         }
         .onAppear(perform: model.refreshRecent)
+        .alert(cleanupPlan?.count == 0 ? "没有可清除的图片" : "清除传图文件夹中的全部图片？",
+               isPresented: $showingCleanupConfirmation, presenting: cleanupPlan) { plan in
+            if plan.count == 0 {
+                Button("好", role: .cancel) {}
+            } else {
+                Button("取消", role: .cancel) {}
+                Button("移到废纸篓", role: .destructive) { clearImages(plan) }
+            }
+        } message: { plan in
+            if plan.count == 0 {
+                Text(verbatim: "传图文件夹\n\(plan.folder.path)")
+            } else {
+                Text(verbatim: "将把以下文件夹顶层的 \(plan.count) 张图片移到废纸篓，范围包括所有来源。\n\n\(plan.folder.path)")
+            }
+        }
+        .onChange(of: showingCleanupConfirmation) { showing in
+            if !showing { cleanupPlan = nil }
+        }
+        .onChange(of: model.folder) { _ in showingCleanupConfirmation = false }
         .onChange(of: devices) { available in
             if let activeSource, case .device(let selected) = filters[activeSource], !available.contains(selected) {
                 filters[activeSource] = .all
+            }
+        }
+    }
+
+    private func prepareImageCleanup() {
+        guard !cleanupBusy else { return }
+        cleanupBusy = true
+        let folder = model.folder
+        Task {
+            defer { cleanupBusy = false }
+            do {
+                let plan = try await Task.detached(priority: .userInitiated) {
+                    try Inbox.prepareImageCleanup(in: folder)
+                }.value
+                guard model.folder == folder else { return }
+                cleanupPlan = plan
+                showingCleanupConfirmation = true
+            } catch {
+                if model.folder == folder { model.errorMessage = "无法读取传图文件夹。\(error.localizedDescription)" }
+            }
+        }
+    }
+
+    private func clearImages(_ plan: Inbox.ImageCleanupPlan) {
+        guard !cleanupBusy, model.folder == plan.folder else { return }
+        cleanupBusy = true
+        Task {
+            let result = await Task.detached(priority: .userInitiated) {
+                Inbox.trashImages(in: plan)
+            }.value
+            cleanupBusy = false
+            model.refreshRecent()
+            if result.failures > 0 || result.skipped > 0 {
+                var details = ["已将 \(result.moved) 张图片移到废纸篓。"]
+                if result.skipped > 0 { details.append("已跳过 \(result.skipped) 张发生变化的图片。") }
+                if result.failures > 0 { details.append("有 \(result.failures) 张未能移到废纸篓。") }
+                if let error = result.firstError { details.append(error) }
+                model.errorMessage = details.joined()
             }
         }
     }
@@ -192,7 +260,7 @@ struct GalleryView: View {
                     ForEach(devices) { device in
                         let name = model.name(for: device)
                         let subtitle = model.subtitle(for: device)
-                        GalleryTab(name, selected: filter == .device(device), theme: theme, compact: true, subtitle: subtitle) {
+                        GalleryTab(name, selected: filter == .device(device), theme: theme, compact: true, subtitle: subtitle, conversation: model.conversation(for: device)) {
                             filters[source] = .device(device)
                         }
                         .help([name, subtitle].compactMap { $0 }.joined(separator: " · "))
@@ -303,27 +371,34 @@ private struct GalleryTab: View {
     let theme: GalleryTheme
     var compact = false
     let subtitle: String?
+    let conversation: MacConversationRoom?
     let action: () -> Void
 
     @State private var hovering = false
 
     init(_ title: String, selected: Bool, theme: GalleryTheme, compact: Bool = false,
-         subtitle: String? = nil, action: @escaping () -> Void) {
+         subtitle: String? = nil, conversation: MacConversationRoom? = nil, action: @escaping () -> Void) {
         self.title = title
         self.selected = selected
         self.theme = theme
         self.compact = compact
         self.subtitle = subtitle
+        self.conversation = conversation
         self.action = action
     }
 
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(compact ? .callout : .body)
-                    .fontWeight(selected ? .semibold : .regular)
-                    .foregroundStyle(selected ? theme.accent : Color.primary)
+                HStack(spacing: 5) {
+                    Text(title)
+                        .font(compact ? .callout : .body)
+                        .fontWeight(selected ? .semibold : .regular)
+                        .foregroundStyle(selected ? theme.accent : Color.primary)
+                    if let conversation {
+                        ConversationTabBadge(room: conversation)
+                    }
+                }
                 if let subtitle {
                     Text(subtitle)
                         .font(.caption)

@@ -86,7 +86,7 @@ final class ReceiverClient: NSObject, URLSessionTaskDelegate {
     private static let session = makeSession(requestTimeout: 8, resourceTimeout: 20)
     private static let videoSession = makeSession(requestTimeout: 25, resourceTimeout: 600)
 
-    private static func makeSession(requestTimeout: TimeInterval, resourceTimeout: TimeInterval) -> URLSession {
+    static func makeSession(requestTimeout: TimeInterval, resourceTimeout: TimeInterval) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.allowsCellularAccess = false
         configuration.httpShouldSetCookies = false
@@ -139,7 +139,7 @@ final class ReceiverClient: NSObject, URLSessionTaskDelegate {
     }
 
     @MainActor
-    private static func deviceRequest(_ receiver: Receiver, path: String) -> URLRequest {
+    static func deviceRequest(_ receiver: Receiver, path: String) -> URLRequest {
         var request = receiver.request(path: path)
         request.httpMethod = "POST"
         request.setValue(InstallationIdentity.deviceID, forHTTPHeaderField: "X-Device-ID")

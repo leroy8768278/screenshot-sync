@@ -180,6 +180,13 @@ final class ReceiverConnection implements AutoCloseable {
         }
     }
 
+    HttpURLConnection openChat(String route, String device, String key) throws IOException {
+        HttpURLConnection http = open("/v1/chat/" + route);
+        setDeviceHeaders(http, device);
+        http.setRequestProperty("X-Chat-Key", key);
+        return http;
+    }
+
     private HttpURLConnection open(String path) throws IOException {
         URL url = new URL("http", host, SyncSettings.PORT, path);
         HttpURLConnection connection = (HttpURLConnection) network.openConnection(url, Proxy.NO_PROXY);

@@ -10,6 +10,9 @@
 		202600000000000000000001 /* ShotSyncApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202600000000000000000011 /* ShotSyncApp.swift */; };
 		202600000000000000000002 /* Receiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202600000000000000000012 /* Receiver.swift */; };
 		202600000000000000000009 /* DeviceInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202600000000000000000024 /* DeviceInfo.swift */; };
+		202600000000000000000081 /* ConversationClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202600000000000000000091 /* ConversationClient.swift */; };
+		202600000000000000000082 /* ConversationDownloads.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202600000000000000000092 /* ConversationDownloads.swift */; };
+		202600000000000000000080 /* DeviceConversation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202600000000000000000090 /* DeviceConversation.swift */; };
 		202600000000000000000003 /* PhotoSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202600000000000000000013 /* PhotoSync.swift */; };
 		202600000000000000000004 /* BGRefresh.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202600000000000000000014 /* BGRefresh.swift */; };
 		202600000000000000000007 /* PairingScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202600000000000000000020 /* PairingScanner.swift */; };
@@ -22,6 +25,9 @@
 		202600000000000000000011 /* ShotSyncApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShotSyncApp.swift; sourceTree = "<group>"; };
 		202600000000000000000012 /* Receiver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Receiver.swift; sourceTree = "<group>"; };
 		202600000000000000000024 /* DeviceInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceInfo.swift; sourceTree = "<group>"; };
+		202600000000000000000091 /* ConversationClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationClient.swift; sourceTree = "<group>"; };
+		202600000000000000000092 /* ConversationDownloads.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationDownloads.swift; sourceTree = "<group>"; };
+		202600000000000000000090 /* DeviceConversation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceConversation.swift; sourceTree = "<group>"; };
 		202600000000000000000013 /* PhotoSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoSync.swift; sourceTree = "<group>"; };
 		202600000000000000000014 /* BGRefresh.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BGRefresh.swift; sourceTree = "<group>"; };
 		202600000000000000000020 /* PairingScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingScanner.swift; sourceTree = "<group>"; };
@@ -58,6 +64,9 @@
 				202600000000000000000011 /* ShotSyncApp.swift */,
 				202600000000000000000012 /* Receiver.swift */,
 				202600000000000000000024 /* DeviceInfo.swift */,
+				202600000000000000000091 /* ConversationClient.swift */,
+				202600000000000000000092 /* ConversationDownloads.swift */,
+				202600000000000000000090 /* DeviceConversation.swift */,
 				202600000000000000000013 /* PhotoSync.swift */,
 				202600000000000000000014 /* BGRefresh.swift */,
 				202600000000000000000020 /* PairingScanner.swift */,
@@ -150,6 +159,9 @@
 				202600000000000000000001 /* ShotSyncApp.swift in Sources */,
 				202600000000000000000002 /* Receiver.swift in Sources */,
 				202600000000000000000009 /* DeviceInfo.swift in Sources */,
+				202600000000000000000081 /* ConversationClient.swift in Sources */,
+				202600000000000000000082 /* ConversationDownloads.swift in Sources */,
+				202600000000000000000080 /* DeviceConversation.swift in Sources */,
 				202600000000000000000003 /* PhotoSync.swift in Sources */,
 				202600000000000000000004 /* BGRefresh.swift in Sources */,
 				202600000000000000000007 /* PairingScanner.swift in Sources */,
@@ -178,10 +190,10 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				"CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]" = ShotSync/Simulator.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 7;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ShotSync/Info.plist;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.3.3;
 				PRODUCT_BUNDLE_IDENTIFIER = local.shotsync.ios;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -195,10 +207,10 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				"CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]" = ShotSync/Simulator.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 7;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ShotSync/Info.plist;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.3.3;
 				PRODUCT_BUNDLE_IDENTIFIER = local.shotsync.ios;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";

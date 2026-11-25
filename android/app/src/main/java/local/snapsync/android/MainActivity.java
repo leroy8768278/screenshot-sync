@@ -27,6 +27,7 @@ import android.provider.Settings;
 import android.text.InputType;
 import android.text.method.PasswordTransformationMethod;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.inputmethod.InputMethodManager;
@@ -123,6 +124,7 @@ public final class MainActivity extends Activity {
     private String selectedSession = "";
     private ArrayList<Uri> selectedMedia = new ArrayList<>();
     private ManualSend manual;
+    private DeviceChat chat;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -148,13 +150,21 @@ public final class MainActivity extends Activity {
                 selectedMedia = restored;
             }
         }
+        chat.restore(savedInstanceState, pairing);
         SyncScheduler.configure(this, pairing);
         showSavedStatus();
     }
 
     @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        if (chat != null) { chat.observeTouch(event); }
+        return super.dispatchTouchEvent(event);
+    }
+
+    @Override
     protected void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state);
+        chat.save(state);
         state.putString("picker_session", pickerSession);
         state.putString("selected_session", selectedSession);
         state.putParcelableArrayList("selected_images", selectedMedia);
@@ -171,6 +181,7 @@ public final class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         resumed = true;
+        chat.foreground(true);
         refreshPermissions();
         SyncSettings.Pairing pairing = SyncSettings.read(this);
         SyncScheduler.configure(this, pairing);
@@ -184,6 +195,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onPause() {
         resumed = false;
+        chat.foreground(false);
         handler.removeCallbacks(scanOnChange);
         updateObserver(false);
         super.onPause();
@@ -200,6 +212,7 @@ public final class MainActivity extends Activity {
         if (manual != null) {
             manual.close();
         }
+        chat.close();
         connectionExecutor.shutdownNow();
         manualExecutor.shutdownNow();
         previewExecutor.shutdownNow();
@@ -335,6 +348,8 @@ public final class MainActivity extends Activity {
         });
         add(destination, connectionSettings, 10);
         add(page, destination, 0);
+        chat = new DeviceChat(this);
+        add(page, chat.view, 12);
 
         LinearLayout card = card(R.string.automatic);
         syncMode = label(0, 14, INK, true);
@@ -590,6 +605,7 @@ public final class MainActivity extends Activity {
 
     private void refreshSyncControls() {
         SyncSettings.Pairing pairing = SyncSettings.read(this);
+        chat.bind(pairing);
         boolean connected = pairing.isVerified();
         boolean configured = pairing.isConfigured();
         syncPanel.setVisibility(connected ? View.VISIBLE : View.GONE);
@@ -656,6 +672,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (chat.result(request, result, data)) { return; }
         if (request == SCAN_PAIRING) {
             handlePairingScan(result, data);
             return;
@@ -851,7 +868,7 @@ public final class MainActivity extends Activity {
         return card;
     }
 
-    private TextView label(int text, int size, int color, boolean bold) {
+    TextView label(int text, int size, int color, boolean bold) {
         TextView view = new TextView(this);
         if (text != 0) {
             view.setText(text);
@@ -879,7 +896,7 @@ public final class MainActivity extends Activity {
         return view;
     }
 
-    private Button button(int text, boolean filled) {
+    Button button(int text, boolean filled) {
         Button view = new Button(this);
         view.setText(text);
         view.setAllCaps(false);
@@ -895,7 +912,7 @@ public final class MainActivity extends Activity {
         return view;
     }
 
-    private GradientDrawable shape(int fill, int stroke, int radius) {
+    GradientDrawable shape(int fill, int stroke, int radius) {
         GradientDrawable drawable = new GradientDrawable();
         drawable.setColor(fill);
         drawable.setCornerRadius(dp(radius));
@@ -903,7 +920,7 @@ public final class MainActivity extends Activity {
         return drawable;
     }
 
-    private LinearLayout actionRow(Button first, Button second) {
+    LinearLayout actionRow(Button first, Button second) {
         LinearLayout row = row();
         row.addView(first, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
         LinearLayout.LayoutParams trailing = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
@@ -919,20 +936,20 @@ public final class MainActivity extends Activity {
         return view;
     }
 
-    private LinearLayout column() {
+    LinearLayout column() {
         LinearLayout view = new LinearLayout(this);
         view.setOrientation(LinearLayout.VERTICAL);
         return view;
     }
 
-    private void add(LinearLayout parent, View child, int topMargin) {
+    void add(LinearLayout parent, View child, int topMargin) {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         params.topMargin = dp(topMargin);
         parent.addView(child, params);
     }
 
-    private int dp(int value) {
+    int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
 }

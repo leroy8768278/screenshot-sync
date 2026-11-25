@@ -9,7 +9,7 @@ final class LocalCaptureController: NSObject, ObservableObject, NSWindowDelegate
     @Published private(set) var hasScreenAccess = false
     private let region = RegionCapture()
     private let onSave: (CGImage) async throws -> Void
-    private var editorWindow: NSWindow?
+    private var editorWindows = Set<NSWindow>()
 
     init(onSave: @escaping (CGImage) async throws -> Void) {
         self.onSave = onSave
@@ -34,11 +34,6 @@ final class LocalCaptureController: NSObject, ObservableObject, NSWindowDelegate
     }
 
     func start() {
-        if let editorWindow {
-            NSApp.activate(ignoringOtherApps: true)
-            editorWindow.makeKeyAndOrderFront(nil)
-            return
-        }
         guard !selecting else { return }
         selecting = true
         hasScreenAccess = CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess()
@@ -56,13 +51,26 @@ final class LocalCaptureController: NSObject, ObservableObject, NSWindowDelegate
         Task {
             defer { selecting = false }
             do {
-                if let image = try await region.select() { presentEditor(image) }
+                if let image = try await selectRegion() { presentEditor(image) }
             } catch {
                 let alert = NSAlert(error: error)
                 NSApp.activate(ignoringOtherApps: true)
                 alert.runModal()
             }
         }
+    }
+
+    private func selectRegion() async throws -> CGImage? {
+        let visible = NSApp.orderedWindows.filter {
+            editorWindows.contains($0) && $0.isVisible && $0.isOnActiveSpace && !$0.isMiniaturized
+        }
+        let key = NSApp.isActive ? NSApp.keyWindow : nil
+        for window in visible { window.orderOut(nil) }
+        defer {
+            for window in visible where editorWindows.contains(window) { window.orderBack(nil) }
+            if let key, visible.contains(key), editorWindows.contains(key) { key.makeKeyAndOrderFront(nil) }
+        }
+        return try await region.select()
     }
 
     private func presentEditor(_ image: CGImage) {
@@ -80,13 +88,15 @@ final class LocalCaptureController: NSObject, ObservableObject, NSWindowDelegate
         window.setContentSize(NSSize(width: 820, height: 570))
         window.collectionBehavior.insert(.moveToActiveSpace)
         window.delegate = self
-        editorWindow = window
+        editorWindows.insert(window)
         window.center()
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
     }
 
-    func windowWillClose(_ notification: Notification) { editorWindow = nil }
+    func windowWillClose(_ notification: Notification) {
+        if let window = notification.object as? NSWindow { editorWindows.remove(window) }
+    }
 
     @objc private func prepareToQuit() { region.cancel() }
 }

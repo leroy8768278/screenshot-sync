@@ -69,4 +69,8 @@
     <string name="manual_unsupported">有文件过大或格式无法接收。视频支持 MP4、MOV 和 M4V，单个视频最多 512 MiB。</string>
     <string name="manual_picker_missing">系统没有可用的照片和视频选择器。</string>
     <string name="manual_video">视频</string>
+    <string name="chat_pick">选文件</string>
+    <string name="chat_send">发送</string>
+    <string name="chat_toggle">与 Mac 对话</string>
+    <string name="chat_clear">清除对话记录…</string>
 </resources>

@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import SystemConfiguration
 
 final class Receiver: @unchecked Sendable {
     static let port: UInt16 = 43871
@@ -7,21 +8,23 @@ final class Receiver: @unchecked Sendable {
     private let listener: NWListener
     private var folder: URL
     private var token: String
+    private let conversations: ConversationStore
     private let onDeviceInfo: @Sendable (ScreenshotDevice, DeviceProfile, _ createdFile: Bool) -> Void
     private let onState: @Sendable (NWListener.State) -> Void
     private let onReceive: @Sendable (ScreenshotDevice?) -> Void
     private var connections: [UUID: UploadConnection] = [:]
 
-    init(folder: URL, token: String,
+    init(folder: URL, token: String, port: UInt16 = Receiver.port, conversations: ConversationStore = .shared,
          onDeviceInfo: @escaping @Sendable (ScreenshotDevice, DeviceProfile, _ createdFile: Bool) -> Void = { _, _, _ in },
          onState: @escaping @Sendable (NWListener.State) -> Void,
          onReceive: @escaping @Sendable (ScreenshotDevice?) -> Void) throws {
         self.folder = folder
         self.token = token
+        self.conversations = conversations
         self.onDeviceInfo = onDeviceInfo
         self.onState = onState
         self.onReceive = onReceive
-        listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: Self.port)!)
+        listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: port)!)
     }
 
     func start() {
@@ -33,7 +36,7 @@ final class Receiver: @unchecked Sendable {
             }
             let id = UUID()
             let upload = UploadConnection(connection: connection, queue: queue, folder: folder, token: token,
-                                          onDeviceInfo: onDeviceInfo, onReceive: onReceive) { [weak self] in
+                                          conversations: conversations, onDeviceInfo: onDeviceInfo, onReceive: onReceive) { [weak self] in
                 self?.connections.removeValue(forKey: id)
             }
             connections[id] = upload
@@ -72,12 +75,22 @@ private final class UploadConnection: @unchecked Sendable {
     private let queue: DispatchQueue
     private let folder: URL
     private let token: String
+    private let conversations: ConversationStore
     private let onDeviceInfo: @Sendable (ScreenshotDevice, DeviceProfile, _ createdFile: Bool) -> Void
     private let onReceive: @Sendable (ScreenshotDevice?) -> Void
     private let onClose: @Sendable () -> Void
     private var timer: DispatchSourceTimer?
     private var header = Data()
     private var stage: Stage?
+    private var chatUpload: ChatUpload?
+    private var download: FileHandle?
+    private struct ChatUpload {
+        let device: ScreenshotDevice
+        let id: UUID
+        let file: StagedFile
+        let filename: String?
+        var remaining: Int
+    }
     private var validationTask: Task<Void, Never>?
     private var responded = false
     private var closed = false
@@ -96,13 +109,14 @@ private final class UploadConnection: @unchecked Sendable {
         let handle: FileHandle
     }
 
-    init(connection: NWConnection, queue: DispatchQueue, folder: URL, token: String,
+    init(connection: NWConnection, queue: DispatchQueue, folder: URL, token: String, conversations: ConversationStore,
          onDeviceInfo: @escaping @Sendable (ScreenshotDevice, DeviceProfile, _ createdFile: Bool) -> Void,
          onReceive: @escaping @Sendable (ScreenshotDevice?) -> Void, onClose: @escaping @Sendable () -> Void) {
         self.connection = connection
         self.queue = queue
         self.folder = folder
         self.token = token
+        self.conversations = conversations
         self.onDeviceInfo = onDeviceInfo
         self.onReceive = onReceive
         self.onClose = onClose
@@ -133,6 +147,10 @@ private final class UploadConnection: @unchecked Sendable {
     }
 
     private func consume(_ data: Data) {
+        if chatUpload != nil {
+            writeChat(data)
+            return
+        }
         if stage != nil {
             write(data)
             return
@@ -156,6 +174,10 @@ private final class UploadConnection: @unchecked Sendable {
             } else {
                 respond(200, "ok", key: "status")
             }
+            return
+        }
+        if request.path.hasPrefix("/v1/chat/") {
+            handleChat(request, body: body)
             return
         }
         guard request.path == "/v1/screenshots" || request.path == "/v1/devices" else {
@@ -330,6 +352,8 @@ private final class UploadConnection: @unchecked Sendable {
         case 201: reason = "Created"
         case 400: reason = "Bad Request"
         case 401: reason = "Unauthorized"
+        case 403: reason = "Forbidden"
+        case 409: reason = "Conflict"
         case 404: reason = "Not Found"
         case 405: reason = "Method Not Allowed"
         case 411: reason = "Length Required"
@@ -357,6 +381,11 @@ private final class UploadConnection: @unchecked Sendable {
             try? file.handle.close()
             try? FileManager.default.removeItem(at: file.url)
         }
+        if let file = chatUpload?.file {
+            try? file.handle.close()
+            try? FileManager.default.removeItem(at: file.url)
+        }
+        try? download?.close()
         connection.cancel()
         onClose()
     }
@@ -401,5 +430,156 @@ private final class UploadConnection: @unchecked Sendable {
             }
             self.headers = headers
         }
+    }
+}
+
+private extension UploadConnection {
+    struct MessagePage: Encodable {
+        let messages: [ConversationMessage]
+        let hasMore: Bool
+        let macName: String
+    }
+
+    private func handleChat(_ request: Request, body: Data) {
+        guard authorized(request.headers["authorization"]) else { respond(401, "invalid_pairing_code"); return }
+        guard let platform = request.headers["x-device-platform"].flatMap(ScreenshotSource.init(rawValue:)),
+              let device = request.device(for: platform),
+              let key = request.headers["x-chat-key"] else { respond(403, "invalid_chat_identity"); return }
+        guard request.headers["transfer-encoding"] == nil else { respond(400, "transfer_encoding_unsupported"); return }
+        do {
+            try conversations.authorize(device: device, key: key, pairingCode: token)
+            let route = request.path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+            switch (request.method, route[0]) {
+            case ("GET", "/v1/chat/messages"):
+                var after = 0
+                if route.count == 2 {
+                    guard route[1].hasPrefix("after="), let value = Int(route[1].dropFirst(6)), value >= 0
+                    else { respond(400, "invalid_cursor"); return }
+                    after = value
+                }
+                let page = try conversations.page(for: device, after: after)
+                if after == 0, let profile = request.profile(for: device) {
+                    // Restore a missed pairing announcement even if this phone has never sent a screenshot.
+                    onDeviceInfo(device, profile, false)
+                }
+                let name = SCDynamicStoreCopyComputerName(nil, nil) as String? ?? "Mac"
+                try sendJSON(MessagePage(messages: page.messages, hasMore: page.hasMore, macName: name))
+            case ("GET", let path) where path.hasPrefix("/v1/chat/files/"):
+                guard route.count == 1, let id = UUID(uuidString: String(path.dropFirst("/v1/chat/files/".count)))
+                else { respond(404, "file_not_found"); return }
+                try sendFile(conversations.fileURL(for: id, device: device))
+            case ("POST", "/v1/chat/text"), ("POST", "/v1/chat/file"):
+                guard route.count == 1 else { respond(404, "not_found"); return }
+                try beginChatUpload(request, from: device, body: body)
+            default: respond(404, "not_found")
+            }
+        } catch { chatError(error) }
+    }
+
+    private func beginChatUpload(_ request: Request, from device: ScreenshotDevice, body: Data) throws {
+        guard let length = request.headers["content-length"], !length.isEmpty,
+              length.utf8.allSatisfy({ (48...57).contains($0) }), let size = Int(length)
+        else { respond(411, "content_length_required"); return }
+        let isFile = request.path == "/v1/chat/file"
+        guard size <= (isFile ? ConversationStore.maxFileBytes : ConversationStore.maxTextBytes)
+        else { throw ConversationError.tooLarge }
+        guard let id = request.headers["x-message-id"].flatMap(UUID.init(uuidString:))
+        else { respond(400, "invalid_message_id"); return }
+        var filename: String?
+        if isFile {
+            guard let field = request.headers["x-file-name"], let data = Data(base64Encoded: field),
+                  let name = String(data: data, encoding: .utf8), ConversationStore.validFilename(name)
+            else { throw ConversationError.invalidFile }
+            filename = name
+        } else if size == 0 { throw ConversationError.invalidText }
+        let expectation = request.headers["expect"]?.lowercased()
+        guard expectation == nil || expectation == "100-continue"
+        else { respond(417, "unsupported_expectation"); return }
+
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("SnapRelay-chat-" + UUID().uuidString)
+        try Data().write(to: url, options: .withoutOverwriting)
+        do {
+            let file = try StagedFile(url: url, handle: FileHandle(forWritingTo: url))
+            chatUpload = ChatUpload(device: device, id: id, file: file, filename: filename, remaining: size)
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            throw error
+        }
+        timer?.schedule(deadline: .now() + .seconds(600))
+        if expectation == "100-continue" {
+            connection.send(content: Data("HTTP/1.1 100 Continue\r\n\r\n".utf8), completion: .contentProcessed {
+                [weak self] error in if error != nil { self?.close() }
+            })
+        }
+        writeChat(body)
+    }
+
+    func writeChat(_ data: Data) {
+        guard var upload = chatUpload else { return }
+        guard data.count <= upload.remaining else { respond(400, "body_exceeds_content_length"); return }
+        do {
+            try upload.file.handle.write(contentsOf: data)
+            upload.remaining -= data.count
+            chatUpload = upload
+            guard upload.remaining == 0 else { return }
+            try upload.file.handle.close()
+            let message: ConversationMessage
+            if let name = upload.filename {
+                message = try conversations.receive(file: upload.file.url, filename: name,
+                                                    from: upload.device, id: upload.id)
+            } else {
+                guard let text = String(data: try Data(contentsOf: upload.file.url), encoding: .utf8)
+                else { throw ConversationError.invalidText }
+                message = try conversations.receive(text: text, from: upload.device, id: upload.id)
+            }
+            try sendJSON(message)
+        } catch { chatError(error) }
+    }
+
+    func chatError(_ error: Error) {
+        switch error {
+        case ConversationError.forbidden: respond(403, "invalid_chat_identity")
+        case ConversationError.tooLarge: respond(413, "message_too_large")
+        case ConversationError.notFound: respond(404, "file_not_found")
+        case ConversationError.invalidText: respond(400, "invalid_message_text")
+        case ConversationError.invalidFile: respond(400, "invalid_file")
+        case ConversationError.conflict: respond(409, "message_id_conflict")
+        default: respond(500, "conversation_storage_error")
+        }
+    }
+
+    func successHeaders(type: String, bytes: Int) -> Data {
+        Data("HTTP/1.1 200 OK\r\nContent-Type: \(type)\r\nContent-Length: \(bytes)\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n".utf8)
+    }
+
+    func sendJSON<T: Encodable>(_ value: T) throws {
+        let data = try JSONEncoder().encode(value)
+        var response = successHeaders(type: "application/json", bytes: data.count)
+        response.append(data)
+        responded = true
+        connection.send(content: response, completion: .contentProcessed { [weak self] _ in self?.close() })
+    }
+
+    func sendFile(_ url: URL) throws {
+        let file = try FileHandle(forReadingFrom: url)
+        download = file
+        let size = try file.seekToEnd()
+        try file.seek(toOffset: 0)
+        responded = true
+        timer?.schedule(deadline: .now() + .seconds(600))
+        connection.send(content: successHeaders(type: "application/octet-stream", bytes: Int(size)),
+                        completion: .contentProcessed { [weak self] error in
+            if error != nil { self?.close() } else { self?.sendNextChunk() }
+        })
+    }
+
+    func sendNextChunk() {
+        guard !closed else { return }
+        do {
+            guard let data = try download?.read(upToCount: 64 * 1024), !data.isEmpty else { close(); return }
+            connection.send(content: data, completion: .contentProcessed { [weak self] error in
+                if error != nil { self?.close() } else { self?.sendNextChunk() }
+            })
+        } catch { close() }
     }
 }

@@ -48,6 +48,7 @@ final class ReceiverModel: ObservableObject {
     private static let deletedDeviceName = ""
     private let defaults: UserDefaults
     private let pathMonitor = NWPathMonitor()
+    private var conversationRooms: [ScreenshotDevice: MacConversationRoom] = [:]
     private var receiver: Receiver?
     private var generation = UUID()
     private var needsInboxRefresh = false
@@ -207,6 +208,13 @@ final class ReceiverModel: ObservableObject {
             let order = name(for: $0).localizedStandardCompare(name(for: $1))
             return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
         }
+    }
+
+    func conversation(for device: ScreenshotDevice) -> MacConversationRoom {
+        if let room = conversationRooms[device] { return room }
+        let room = MacConversationRoom(device: device, defaults: defaults)
+        conversationRooms[device] = room
+        return room
     }
 
     func name(for device: ScreenshotDevice) -> String {

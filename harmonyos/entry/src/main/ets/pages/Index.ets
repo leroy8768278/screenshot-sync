@@ -9,9 +9,14 @@ import { scanPairing } from '../sync/ScanPairing';
 import { GALLERY_PERMISSION, galleryAllowed, syncScreenshots, SyncCancellation, SyncResult } from '../sync/ScreenshotSync';
 import { updateSchedule } from '../work/Schedule';
 
+import { CHAT_INPUT_ID, ChatCard } from './ChatCard';
+
 const BLUE: string = '#2359D7';
 const INK: string = '#162444';
 const MUTED: string = '#475975';
+const HOST_INPUT_ID: string = 'receiver-host-input';
+const TOKEN_INPUT_ID: string = 'receiver-token-input';
+const DISMISS_CHAT_KEYBOARD: string = 'dismiss-chat-keyboard';
 
 function versionLabel(): string {
   try {
@@ -25,12 +30,14 @@ function versionLabel(): string {
 @Entry
 @Component
 struct Index {
+  private readonly chatEditor: TextAreaController = new TextAreaController();
   @StorageProp('syncForeground') @Watch('foregroundChanged') private foreground: boolean = false;
   @State private host: string = '';
   @State private token: string = '';
   @State private syncEnabled: boolean = false;
   @State private hasPairing: boolean = false;
   @State private activeHost: string = '';
+  @State private chatRoom: string = '';
   @State private cutoffLabel: string = '';
   @State private showSettings: boolean = false;
   @State private galleryGranted: boolean = false;
@@ -99,6 +106,7 @@ struct Index {
     this.syncEnabled = pairing.enabled;
     this.hasPairing = true;
     this.activeHost = pairing.host;
+    this.chatRoom = pairing.pairedAfterMs !== undefined ? pairing.destination + ':' + pairing.host : '';
     if (pairing.pairedAfterMs !== undefined) {
       const date = new Date(pairing.pairedAfterMs);
       this.cutoffLabel = date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
@@ -332,6 +340,7 @@ struct Index {
       this.hasPairing = false;
       this.syncEnabled = false;
       this.activeHost = '';
+      this.chatRoom = '';
       this.cutoffLabel = '';
       this.token = '';
       this.showSettings = false;
@@ -607,6 +616,9 @@ struct Index {
         .backgroundColor('#FFFFFF')
         .borderRadius(22)
 
+        if (this.chatRoom.length > 0) {
+          ChatCard({ room: this.chatRoom, editor: this.chatEditor })
+        }
         if (this.hasPairing) {
           Button(this.selecting ? '正在选择媒体…' : '手动选图或视频')
             .width('100%')
@@ -715,6 +727,7 @@ struct Index {
               .fontSize(14)
               .fontColor(INK)
             TextInput({ text: this.host, placeholder: '192.168.1.20:43871' })
+              .id(HOST_INPUT_ID)
               .type(InputType.Normal)
               .width('100%')
               .backgroundColor('#F3F6FC')
@@ -726,6 +739,7 @@ struct Index {
               .fontSize(14)
               .fontColor(INK)
             TextInput({ text: this.token, placeholder: '24 位配对码' })
+              .id(TOKEN_INPUT_ID)
               .type(InputType.Password)
               .width('100%')
               .backgroundColor('#F3F6FC')
@@ -770,5 +784,17 @@ struct Index {
     .height('100%')
     .backgroundColor('#F3F6FC')
     .scrollBar(BarState.Off)
+    .parallelGesture(TapGesture().tag(DISMISS_CHAT_KEYBOARD).onAction(() => {
+      this.chatEditor.stopEditing();
+    }))
+    .onTouchTestDone((_event: BaseGestureEvent, recognizers: GestureRecognizer[]) => {
+      const editingField = recognizers.some((r: GestureRecognizer): boolean => {
+        const id = r.getEventTargetInfo().getId();
+        return id === CHAT_INPUT_ID || id === HOST_INPUT_ID || id === TOKEN_INPUT_ID;
+      });
+      if (editingField) {
+        recognizers.find((r: GestureRecognizer): boolean => r.getTag() === DISMISS_CHAT_KEYBOARD)?.preventBegin();
+      }
+    })
   }
 }

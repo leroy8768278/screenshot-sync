@@ -317,23 +317,24 @@ struct LocalScreenshotEditor: View {
 
     private func copyImage() {
         guard !busy else { return }
-        busy = true
         let snapshot = document
-        Task {
-            defer { busy = false }
-            do {
-                let png = try await Task.detached(priority: .userInitiated) {
-                    let bitmap = NSBitmapImageRep(cgImage: try snapshot.rendered())
-                    guard let data = bitmap.representation(using: .png, properties: [:]) else { throw EditorError.copy }
-                    return data
-                }.value
-                let item = NSPasteboardItem()
-                guard item.setData(png, forType: .png) else { throw EditorError.copy }
-                NSPasteboard.general.clearContents()
-                guard NSPasteboard.general.writeObjects([item]) else { throw EditorError.copy }
-                copied = true
-            } catch { self.error = error.localizedDescription }
-        }
+        do {
+            let request = try ImageClipboardRequest(types: [.png]) {
+                let bitmap = NSBitmapImageRep(cgImage: try snapshot.rendered())
+                guard let png = bitmap.representation(using: .png, properties: [:]) else { throw EditorError.copy }
+                return [GalleryImage.Representation(type: NSPasteboard.PasteboardType.png.rawValue, data: png)]
+            }
+            busy = true
+            Task {
+                defer { busy = false }
+                do {
+                    try await request.finish()
+                    copied = true
+                } catch is CancellationError {
+                    copied = false
+                } catch { self.error = error.localizedDescription }
+            }
+        } catch { self.error = error.localizedDescription }
     }
 
     private var drawingArea: some View {

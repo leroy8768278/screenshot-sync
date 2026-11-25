@@ -12,7 +12,7 @@ struct ScreenshotPreviewSheet: View {
     @State private var images: [ReceivedScreenshot]
     @State private var index: Int
     @State private var pixels: GalleryImage.Pixels?
-    @State private var copyTask: Task<Void, Never>?
+    @State private var pendingCopy: ImageClipboardRequest?
     @State private var feedback: CopyFeedback?
 
     init(model: ReceiverModel, images: [ReceivedScreenshot], index: Int, source: ScreenshotSource?,
@@ -112,26 +112,22 @@ struct ScreenshotPreviewSheet: View {
                     case .failed(let message):
                         Text(message).foregroundStyle(.red)
                     }
+                } else if pendingCopy != nil {
+                    ProgressView().controlSize(.small)
+                        .accessibilityLabel("正在复制图片")
                 }
                 if !image.isVideo {
-                    Button {
-                        copyImage(image)
-                    } label: {
+                    Button(action: copyCurrentImage) {
                         Label("复制图片", systemImage: "document.on.document")
                     }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut("c", modifiers: .command)
-                    .disabled(copyTask != nil)
                     .accessibilityIdentifier("preview-copy")
                 }
-                Button {
-                    model.refreshRecent()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .keyboardShortcut("r", modifiers: .command)
-                .help("刷新预览")
-                .accessibilityLabel("刷新预览")
+                Button("刷新", action: model.refreshRecent)
+                    .keyboardShortcut("r", modifiers: .command)
+                    .help("刷新预览")
+                    .accessibilityLabel("刷新预览")
             }
             .font(.callout.monospacedDigit())
             .foregroundStyle(.secondary)
@@ -143,7 +139,7 @@ struct ScreenshotPreviewSheet: View {
         .onReceive(model.$recent) { list in
             reconcile(with: list[source, default: []])
         }
-        .onDisappear { copyTask?.cancel() }
+        .onDisappear { pendingCopy = nil }
     }
 
     private func reconcile(with updated: [ReceivedScreenshot]) {
@@ -151,7 +147,7 @@ struct ScreenshotPreviewSheet: View {
         let byID = Dictionary(uniqueKeysWithValues: updated.map { ($0.id, $0) })
         let surviving = images.compactMap { byID[$0.id] }
         guard let newIndex = surviving.firstIndex(where: { $0.id == current.id }) else {
-            copyTask?.cancel()
+            pendingCopy = nil
             dismiss()
             return
         }
@@ -162,28 +158,37 @@ struct ScreenshotPreviewSheet: View {
     private func navigate(by offset: Int) {
         let nextIndex = index + offset
         guard images.indices.contains(nextIndex) else { return }
-        copyTask?.cancel()
-        copyTask = nil
+        pendingCopy = nil
         feedback = nil
         pixels = nil
         index = nextIndex
     }
 
-    private func copyImage(_ image: ReceivedScreenshot) {
-        guard copyTask == nil else { return }
+    private func copyCurrentImage() {
+        // SwiftUI can retain the shortcut action across pages. Read the live selection when it fires.
+        let image = images[index]
+        guard !image.isVideo else { return }
+        pendingCopy = nil
         feedback = nil
-        copyTask = Task {
-            defer {
-                if !Task.isCancelled { copyTask = nil }
+        do {
+            let request = try GalleryImage.beginCopy(image.url)
+            pendingCopy = request
+            Task {
+                let result: CopyFeedback?
+                do {
+                    try await request.finish()
+                    result = .copied
+                } catch is CancellationError {
+                    result = nil
+                } catch {
+                    result = .failed(error.localizedDescription)
+                }
+                guard pendingCopy === request else { return }
+                pendingCopy = nil
+                feedback = result
             }
-            do {
-                try await GalleryImage.copy(image.url)
-                guard !Task.isCancelled else { return }
-                feedback = .copied
-            } catch {
-                guard !Task.isCancelled else { return }
-                feedback = .failed(error.localizedDescription)
-            }
+        } catch {
+            feedback = .failed(error.localizedDescription)
         }
     }
 }
