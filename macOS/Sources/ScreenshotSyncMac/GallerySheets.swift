@@ -423,7 +423,7 @@ struct ConnectionSheet: View {
                         .help(model.folder.path)
                 }
                 Spacer()
-                Button("更改…", action: model.selectFolder)
+                Button("更改存储位置", action: model.selectFolder)
                 Button("在访达中打开", action: model.openFolder)
             }
             HStack {

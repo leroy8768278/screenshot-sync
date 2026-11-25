@@ -106,7 +106,7 @@ struct GalleryView: View {
                     .accessibilityIdentifier("gallery-refresh")
             }
             ToolbarItem(placement: .primaryAction) {
-                Button("清除全部图片…", action: prepareImageCleanup)
+                Button("清除全部图片", action: prepareImageCleanup)
                     .disabled(cleanupBusy || showingCleanupConfirmation)
                     .help("将传图文件夹中所有来源的图片移到废纸篓")
                     .accessibilityIdentifier("gallery-clear-images")

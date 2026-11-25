@@ -65,6 +65,8 @@ final class ConversationStore: @unchecked Sendable {
               time REAL NOT NULL, sender TEXT NOT NULL, kind TEXT NOT NULL, text TEXT, filename TEXT,
               bytes INTEGER NOT NULL, UNIQUE(device, id));
             CREATE INDEX IF NOT EXISTS conversation_order ON messages(device, seq);
+            CREATE TABLE IF NOT EXISTS mac_history(
+              device TEXT PRIMARY KEY, cleared_through INTEGER NOT NULL);
             """
         guard sqlite3_exec(handle, schema, nil, nil, nil) == SQLITE_OK else {
             sqlite3_close(handle)
@@ -149,7 +151,27 @@ final class ConversationStore: @unchecked Sendable {
     }
 
     func messages(for device: ScreenshotDevice) throws -> [ConversationMessage] {
-        try queue.sync { try rows(where: "device = ? ORDER BY seq", values: [device.id]) }
+        try queue.sync {
+            try rows(where: """
+                device = ?1 AND seq > COALESCE(
+                    (SELECT cleared_through FROM mac_history WHERE device = ?1), 0)
+                ORDER BY seq
+                """, values: [device.id])
+        }
+    }
+
+    // The phone fetches its own history from the delivery log even after a local Mac clear.
+    func clearHistory(for device: ScreenshotDevice, through sequence: Int) throws {
+        let changed = try queue.sync {
+            try execute("""
+                INSERT INTO mac_history(device, cleared_through)
+                SELECT device, MAX(seq) FROM messages WHERE device = ? AND seq <= ? GROUP BY device
+                ON CONFLICT(device) DO UPDATE SET cleared_through = excluded.cleared_through
+                WHERE excluded.cleared_through > mac_history.cleared_through
+                """, [device.id, String(sequence)])
+            return sqlite3_changes(try open()) > 0
+        }
+        if changed { NotificationCenter.default.post(name: .conversationDidChange, object: device.id) }
     }
 
     func page(for device: ScreenshotDevice, after: Int) throws -> (messages: [ConversationMessage], hasMore: Bool) {

@@ -13,6 +13,7 @@ final class MacConversationRoom: ObservableObject {
     @Published private(set) var messages: [ConversationMessage] = []
     @Published private(set) var unread = 0
     @Published private(set) var sending = false
+    @Published private(set) var clearing = false
     @Published private(set) var received = Set<UUID>()
     @Published var expanded = false
     @Published var draft = "" {
@@ -25,6 +26,7 @@ final class MacConversationRoom: ObservableObject {
     private let defaults: UserDefaults
     private let cursorKey: String
     private var readThrough: Int
+    private var clearedThrough = 0
     private var draftID = UUID()
     private var changeObserver: AnyCancellable?
     private var loading = false
@@ -56,8 +58,7 @@ final class MacConversationRoom: ObservableObject {
                 let latest = try await Task.detached(priority: .utility) {
                     try store.messages(for: device)
                 }.value
-                messages = latest
-                unread = latest.lazy.filter { $0.sender == "phone" && $0.sequence > self.readThrough }.count
+                showMessages(latest)
             } catch {
                 notice = "读取对话失败。\(error.localizedDescription)"
             }
@@ -65,6 +66,32 @@ final class MacConversationRoom: ObservableObject {
             if reloadRequested {
                 reloadRequested = false
                 reload()
+            }
+        }
+    }
+
+    private func showMessages(_ latest: [ConversationMessage]) {
+        // A read started before confirmation may finish after the history was cleared.
+        messages = latest.filter { $0.sequence > clearedThrough }
+        unread = messages.lazy.filter { $0.sender == "phone" && $0.sequence > self.readThrough }.count
+        if !received.isEmpty { received.formIntersection(messages.lazy.map(\.id)) }
+    }
+
+    func clearHistory(through sequence: Int) {
+        guard !clearing else { return }
+        clearing = true
+        let store = store, device = device
+        Task {
+            defer { clearing = false }
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try store.clearHistory(for: device, through: sequence)
+                }.value
+                clearedThrough = max(clearedThrough, sequence)
+                showMessages(messages)
+                notice = "已清除本机对话记录。"
+            } catch {
+                notice = "清除失败。\(error.localizedDescription)"
             }
         }
     }
@@ -98,14 +125,17 @@ final class MacConversationRoom: ObservableObject {
         sending = true
         notice = nil
         let device = device, store = store, text = draft, id = draftID, files = attachments
+        let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if hasText { draft = "" }
         Task {
             defer { sending = false }
+            var textPending = hasText
             do {
-                if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if hasText {
                     _ = try await Task.detached(priority: .userInitiated) {
                         try store.send(text: text, to: device, id: id)
                     }.value
-                    draft = ""
+                    textPending = false
                 }
                 for file in files {
                     _ = try await Task.detached(priority: .userInitiated) {
@@ -117,6 +147,14 @@ final class MacConversationRoom: ObservableObject {
                 }
                 notice = "已发送至对话"
             } catch {
+                if textPending {
+                    if draft.isEmpty {
+                        draft = text
+                        draftID = id
+                    } else {
+                        draft = text + "\n" + draft
+                    }
+                }
                 notice = "发送失败。\(error.localizedDescription)"
             }
         }

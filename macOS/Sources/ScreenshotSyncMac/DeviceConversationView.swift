@@ -24,6 +24,13 @@ struct DeviceConversationView: View {
 
     @Environment(\.controlActiveState) private var windowState
     @Environment(\.scenePhase) private var scenePhase
+    @State private var clearRequest: ClearRequest?
+
+    private struct ClearRequest: Identifiable {
+        let through: Int
+        let count: Int
+        var id: Int { through }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -31,6 +38,16 @@ struct DeviceConversationView: View {
             if room.expanded {
                 Divider()
                 VStack(alignment: .leading, spacing: 7) {
+                    Button("清除对话记录") {
+                        if let last = room.messages.last {
+                            clearRequest = ClearRequest(through: last.sequence, count: room.messages.count)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(room.messages.isEmpty || room.clearing)
+                    .accessibilityIdentifier("conversation-clear")
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding(.top, 7)
                     history
                     composer
                     if let notice = room.notice {
@@ -52,6 +69,14 @@ struct DeviceConversationView: View {
         .onChange(of: room.expanded) { _ in markReadIfVisible() }
         .onChange(of: windowState) { _ in markReadIfVisible() }
         .onChange(of: scenePhase) { _ in markReadIfVisible() }
+        .alert(item: $clearRequest) { request in
+            Alert(
+                title: Text("清除与“\(deviceName)”的对话记录？"),
+                message: Text("将从本机对话中清除这 \(request.count) 条记录。手机仍可查看这些消息和附件。"),
+                primaryButton: .cancel(Text("取消")),
+                secondaryButton: .destructive(Text("清除记录")) { room.clearHistory(through: request.through) }
+            )
+        }
     }
 
     private func markReadIfVisible() {
@@ -138,11 +163,7 @@ struct DeviceConversationView: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 6) {
-            TextField("输入或粘贴文字…", text: $room.draft, axis: .vertical)
-                .textFieldStyle(.plain)
-                .lineLimit(2...4)
-                .accessibilityLabel("对话文字")
-                .accessibilityIdentifier("conversation-draft")
+            ConversationDraftField(text: $room.draft, onSend: room.send)
             if !room.attachments.isEmpty {
                 ScrollView(.horizontal) {
                     HStack(spacing: 5) {
@@ -154,6 +175,7 @@ struct DeviceConversationView: View {
                                     Image(systemName: "xmark.circle.fill")
                                 }
                                 .buttonStyle(.borderless)
+                                .disabled(room.sending)
                                 .accessibilityLabel("移除附件 \(item.url.lastPathComponent)")
                             }
                             .font(.caption)
@@ -169,6 +191,7 @@ struct DeviceConversationView: View {
                     Label("选文件", systemImage: "paperclip")
                 }
                 .buttonStyle(.borderless)
+                .disabled(room.sending)
                 Spacer()
                 if room.sending {
                     ProgressView().controlSize(.small)
@@ -177,14 +200,13 @@ struct DeviceConversationView: View {
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.return, modifiers: .command)
                     .disabled(!room.canSend)
-                    .help("发送（⌘↩）")
+                    .help("回车发送，Shift + 回车换行")
                     .accessibilityIdentifier("conversation-send")
             }
         }
         .padding(9)
         .background(theme.page, in: RoundedRectangle(cornerRadius: 8))
         .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(theme.border) }
-        .disabled(room.sending)
     }
 }
 
