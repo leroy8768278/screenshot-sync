@@ -11,6 +11,13 @@ struct ChatClearPlan: Identifiable {
 
 @MainActor
 final class PhoneConversation: ObservableObject {
+    struct AttachmentProgress {
+        let attempt = UUID()
+        let name: String
+        let total: Int64
+        var sent: Int64 = 0
+    }
+
     let receiver: Receiver
     var isViewing = false
     var action: Task<Void, Never>?
@@ -22,6 +29,7 @@ final class PhoneConversation: ObservableObject {
         didSet { if draft != oldValue { textID = UUID() } }
     }
     @Published private(set) var attachments: [DraftAttachment] = []
+    @Published private(set) var upload: AttachmentProgress?
     @Published private(set) var working = false
     @Published private(set) var receiving: UUID?
     @Published private(set) var files: [UUID: URL] = [:]
@@ -37,6 +45,7 @@ final class PhoneConversation: ObservableObject {
 
     init(receiver: Receiver) {
         self.receiver = receiver
+        macName = receiver.displayName
         readKey = "chat.lastRead." + receiver.historyKey
         lastRead = UserDefaults.standard.integer(forKey: readKey)
         clearKey = "chat.clearedThrough." + receiver.historyKey
@@ -134,7 +143,7 @@ final class PhoneConversation: ObservableObject {
     func send() async {
         guard !working, hasDraft else { return }
         working = true
-        notice = "正在发送…"
+        notice = nil
         defer { working = false }
         do {
             if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -143,7 +152,14 @@ final class PhoneConversation: ObservableObject {
             }
             for file in attachments {
                 try Task.checkCancellation()
-                try await ConversationClient.send(file, to: receiver)
+                let progress = AttachmentProgress(name: file.name, total: Int64(file.bytes))
+                upload = progress
+                defer { upload = nil }
+                try await ConversationClient.send(file, to: receiver) { [weak self] sent, _ in
+                    guard let self, let current = self.upload, current.attempt == progress.attempt,
+                          sent > current.sent else { return }
+                    self.upload?.sent = min(sent, current.total)
+                }
                 remove(file)
             }
             notice = "已发送"
@@ -211,25 +227,27 @@ struct ConversationLink: View {
         NavigationLink {
             DeviceConversation(chat: chat)
         } label: {
-            HStack(spacing: 10) {
+            HStack(spacing: 12) {
                 Image(systemName: "bubble.left.and.bubble.right")
-                    .foregroundStyle(.indigo)
-                    .frame(width: 36, height: 36)
-                    .background(.indigo.opacity(0.14), in: RoundedRectangle(cornerRadius: 10))
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("与 \(chat.macName) 对话").font(.headline).lineLimit(2)
+                    .foregroundStyle(RelayStyle.accent)
+                    .frame(width: 40, height: 40)
+                    .background(RelayStyle.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 12))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("设备对话").font(.headline)
                     Text(chat.entries.last?.snippet ?? "文字和文件")
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 4)
                 if chat.unread > 0 {
-                    Text("\(chat.unread) 条未读").font(.caption2.bold())
-                        .padding(.horizontal, 7).padding(.vertical, 4)
-                        .background(.indigo.opacity(0.18), in: Capsule())
+                    Text("\(chat.unread)").font(.caption2.bold()).foregroundStyle(.white)
+                        .padding(6).background(RelayStyle.green, in: Capsule())
+                        .accessibilityLabel("\(chat.unread) 条未读")
                 }
+                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
             }
-            .padding(.vertical, 4)
+            .contentShape(Rectangle()).padding(.vertical, 8)
         }
+        .buttonStyle(.plain)
         .accessibilityIdentifier("phone-chat-open")
     }
 }
@@ -248,7 +266,6 @@ private struct DeviceConversation: View {
         VStack(spacing: 0) {
             messageList
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            Divider()
             VStack(alignment: .leading, spacing: 6) {
                 if let error = chat.connectionError {
                     Label(error, systemImage: "wifi.exclamationmark").font(.caption).foregroundStyle(.secondary)
@@ -261,7 +278,9 @@ private struct DeviceConversation: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
-        .tint(.indigo)
+        .background(RelayStyle.canvas.ignoresSafeArea())
+        .toolbar(.visible, for: .navigationBar)
+        .tint(RelayStyle.accent)
         .navigationTitle(chat.macName)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -348,14 +367,14 @@ private struct DeviceConversation: View {
                 .font(.caption2).foregroundStyle(.secondary)
             if let text = entry.text, entry.kind == .text {
                 Text(verbatim: text)
-                    .font(.subheadline).textSelection(.enabled)
-                    .padding(.horizontal, 11).padding(.vertical, 8)
-                    .background(mine ? Color.indigo.opacity(0.17) : Color.secondary.opacity(0.11),
-                                in: RoundedRectangle(cornerRadius: 12))
-                Button("复制") {
-                    UIPasteboard.general.string = text
-                    chat.notice = "已复制"
-                }.font(.caption).accessibilityLabel("复制此条文字")
+                    .font(.body)
+                    .padding(.horizontal, 13).padding(.vertical, 10)
+                    .background(mine ? RelayStyle.accent.opacity(0.15) : Color(uiColor: .secondarySystemGroupedBackground),
+                                in: RoundedRectangle(cornerRadius: 16))
+                    .contextMenu {
+                        Button("复制文字", systemImage: "doc.on.doc") { copy(text) }
+                    }
+                    .accessibilityAction(named: "复制文字") { copy(text) }
             } else if entry.kind == .file {
                 HStack(spacing: 6) {
                     Image(systemName: "doc")
@@ -391,20 +410,29 @@ private struct DeviceConversation: View {
         .buttonStyle(.borderless)
     }
 
+    private func copy(_ text: String) {
+        UIPasteboard.general.string = text
+        chat.notice = "已复制"
+    }
+
     private var composer: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            TextField("输入或粘贴文字…", text: $chat.draft, axis: .vertical)
-                .font(.subheadline)
-                .lineLimit(1...4)
-                .accessibilityIdentifier("phone-chat-input")
-                .focused($composing)
-                .background {
-                    if composing {
-                        OutsideEditorTap { composing = false }
-                            .allowsHitTesting(false)
+        VStack(alignment: .leading, spacing: 4) {
+            if let upload = chat.upload {
+                let fraction = upload.total > 0 ? Double(upload.sent) / Double(upload.total) : 1
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(upload.sent == upload.total ? "等待 Mac 确认" : "正在上传")
+                        Text(verbatim: upload.name).lineLimit(1).truncationMode(.middle)
+                        Spacer()
+                        Text(fraction, format: .percent.precision(.fractionLength(0)).rounded(rule: .down))
+                            .monospacedDigit()
                     }
+                    .font(.caption)
+                    ProgressView(value: fraction).tint(RelayStyle.accent)
                 }
-                .disabled(chat.working)
+                .padding(.horizontal, 6)
+                .accessibilityElement(children: .combine)
+            }
             if !chat.attachments.isEmpty {
                 ScrollView(.horizontal) {
                     HStack {
@@ -424,29 +452,39 @@ private struct DeviceConversation: View {
                 .scrollIndicators(.hidden)
                 .disabled(chat.working)
             }
-            HStack(spacing: 8) {
-                Button { exportSource = nil; picking = true } label: { Label("选文件", systemImage: "paperclip") }
-                    .buttonStyle(.borderless).disabled(chat.working)
-                Spacer(minLength: 0)
-                if chat.working { ProgressView().controlSize(.small) }
+            HStack(alignment: .bottom, spacing: 6) {
+                Button { exportSource = nil; picking = true } label: {
+                    Image(systemName: "paperclip").frame(width: 40, height: 44)
+                }
+                .accessibilityLabel("选文件").disabled(chat.working)
+                TextField("输入或粘贴文字", text: $chat.draft, axis: .vertical)
+                    .lineLimit(1...5)
+                    .frame(minHeight: 44)
+                    .accessibilityIdentifier("phone-chat-input")
+                    .focused($composing)
+                    .background {
+                        if composing {
+                            OutsideEditorTap { composing = false }.allowsHitTesting(false)
+                        }
+                    }
+                    .disabled(chat.working)
+                if chat.working && chat.upload == nil { ProgressView().controlSize(.small) }
                 Button {
                     composing = false
                     chat.action = Task { await chat.send() }
                 } label: {
-                    Text("发送")
-                        .fontWeight(.semibold)
-                        .padding(.horizontal, 12)
-                        .frame(minHeight: 30)
+                    Text("发送").font(.subheadline.weight(.semibold))
+                        .fixedSize().padding(.horizontal, 14).frame(minHeight: 40)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
+                .foregroundStyle(chat.hasDraft && !chat.working ? Color.white : .secondary)
+                .background(chat.hasDraft && !chat.working ? RelayStyle.green : Color.secondary.opacity(0.12), in: Capsule())
                 .disabled(!chat.hasDraft || chat.working)
                 .keyboardShortcut(.return, modifiers: .command)
                 .accessibilityIdentifier("phone-chat-send")
             }
-            .font(.subheadline).controlSize(.small)
         }
-        .padding(10)
-        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+        .modifier(RelayDock())
         .buttonStyle(.borderless)
     }
 }

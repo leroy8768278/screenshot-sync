@@ -25,7 +25,7 @@
     <key>NSCameraUsageDescription</key>
     <string>扫描 Mac 上的即图二维码，配对这台设备。</string>
     <key>NSPhotoLibraryUsageDescription</key>
-    <string>识别配对后截取的新截图并自动发送到你的 Mac。</string>
+    <string>允许完全访问照片，以便即图识别配对后的新截图，并通过局域网自动发送到你的 Mac。</string>
     <key>NSPhotoLibraryPreventAutomaticLimitedAccessAlert</key>
     <true/>
     <key>NSLocalNetworkUsageDescription</key>

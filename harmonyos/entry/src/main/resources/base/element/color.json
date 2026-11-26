@@ -1,5 +1,44 @@
 {
   "color": [
-    { "name": "window_background", "value": "#F3F6FC" }
+    {
+      "name": "window_background",
+      "value": "#F7F9F5"
+    },
+    {
+      "name": "ink",
+      "value": "#172D27"
+    },
+    {
+      "name": "secondary_text",
+      "value": "#53685E"
+    },
+    {
+      "name": "soft",
+      "value": "#E4EEE6"
+    },
+    {
+      "name": "surface",
+      "value": "#FFFFFF"
+    },
+    {
+      "name": "line",
+      "value": "#D9E3DB"
+    },
+    {
+      "name": "bubble",
+      "value": "#DFF1E5"
+    },
+    {
+      "name": "accent_text",
+      "value": "#195B47"
+    },
+    {
+      "name": "warning",
+      "value": "#AF342F"
+    },
+    {
+      "name": "dock",
+      "value": "#EEF7F3EE"
+    }
   ]
 }

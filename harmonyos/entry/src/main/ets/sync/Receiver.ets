@@ -2,11 +2,14 @@ import { buffer } from '@kit.ArkTS';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { connection } from '@kit.NetworkKit';
 import { rcp } from '@kit.RemoteCommunicationKit';
+import { MacProfile, macProfile } from './MacProfile';
 import { ChatMessage, ChatPage, MAX_CHAT_FILE, MAX_CHAT_TEXT } from './ChatTypes';
 import { MediaFormat, RECEIVER_PORT } from './Protocol';
 
 interface HealthResponse {
   status: string;
+  macName?: string;
+  macFamily?: string;
 }
 
 interface DeviceInfo {
@@ -28,13 +31,16 @@ function availableInfo(read: () => string, limit: number): string | undefined {
   return undefined;
 }
 
-export async function findVerifiedHost(hosts: string[], token: string): Promise<string> {
+export class VerifiedReceiver {
+  constructor(public host: string, public mac: MacProfile) {}
+}
+
+export async function findVerifiedHost(hosts: string[], token: string): Promise<VerifiedReceiver> {
   let message = '无法连接到 Mac，请确认手机和 Mac 在同一局域网';
   for (const host of hosts) {
     const receiver = new Receiver(host, token);
     try {
-      await receiver.verify();
-      return host;
+      return new VerifiedReceiver(host, await receiver.verify());
     } catch (error) {
       if (error instanceof Error) {
         message = error.message;
@@ -66,7 +72,7 @@ export class Receiver {
     });
   }
 
-  async verify(): Promise<void> {
+  async verify(): Promise<MacProfile> {
     const request = new rcp.Request(this.baseURL + '/v1/health', 'GET', {
       'Authorization': this.authorization
     });
@@ -82,6 +88,7 @@ export class Receiver {
     if (health?.status !== 'ok') {
       throw new Error('此地址未返回即图接收端的配对响应');
     }
+    return macProfile(health.macName, health.macFamily);
   }
 
   static async reportDevice(host: string, token: string, deviceId: string): Promise<void> {

@@ -168,12 +168,13 @@ enum ConversationClient {
         try validate(response)
     }
 
-    static func send(_ file: DraftAttachment, to receiver: Receiver) async throws {
+    static func send(_ file: DraftAttachment, to receiver: Receiver, onProgress: @escaping ReceiverClient.UploadProgress) async throws {
         var request = try await request(receiver, path: "file", method: "POST")
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         request.setValue(file.id.uuidString.lowercased(), forHTTPHeaderField: "X-Message-ID")
         request.setValue(Data(file.name.utf8).base64EncodedString(), forHTTPHeaderField: "X-File-Name")
-        let (_, response) = try await transfer.upload(for: request, fromFile: file.url)
+        let delegate = ReceiverClient.uploadDelegate(byteCount: Int64(file.bytes), onProgress: onProgress)
+        let (_, response) = try await transfer.upload(for: request, fromFile: file.url, delegate: delegate)
         try validate(response)
     }
 

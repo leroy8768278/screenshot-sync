@@ -21,143 +21,138 @@ struct ShotSyncApp: App {
     }
 }
 
+enum RelayStyle {
+    static let green = Color(red: 0.07, green: 0.34, blue: 0.28)
+    static let accent = Color(uiColor: UIColor { trait in
+        trait.userInterfaceStyle == .dark ? UIColor(red: 0.55, green: 0.86, blue: 0.72, alpha: 1)
+            : UIColor(red: 0.07, green: 0.34, blue: 0.28, alpha: 1)
+    })
+    static let canvas = Color(uiColor: UIColor { trait in
+        trait.userInterfaceStyle == .dark ? UIColor(red: 0.055, green: 0.085, blue: 0.078, alpha: 1)
+            : UIColor(red: 0.974, green: 0.980, blue: 0.965, alpha: 1)
+    })
+    static let card = LinearGradient(colors: [Color(red: 0.22, green: 0.44, blue: 0.38),
+                                               Color(red: 0.06, green: 0.21, blue: 0.18)],
+                                     startPoint: .topTrailing, endPoint: .bottomLeading)
+}
+
+struct RelayDock: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var solid
+    @ViewBuilder func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 23)
+        if #available(iOS 26.0, *), !solid {
+            content.padding(7).glassEffect(.regular, in: shape)
+        } else {
+            content.padding(7)
+                .background(solid ? AnyShapeStyle(Color(uiColor: .secondarySystemBackground)) : AnyShapeStyle(.regularMaterial), in: shape)
+                .overlay { shape.strokeBorder(.secondary.opacity(0.18), lineWidth: 1) }
+        }
+    }
+}
+
+private struct DockButtonLabel: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .font(.headline)
+            .frame(maxWidth: .infinity, minHeight: 46)
+            .foregroundStyle(.white)
+            .background(RelayStyle.green, in: RoundedRectangle(cornerRadius: 16))
+            .modifier(RelayDock())
+            .contentShape(Rectangle())
+    }
+}
+
 private struct SyncHome: View {
+    private struct RecentClear {
+        let receiver: Receiver
+        let ids: Set<String>
+    }
+
     @ObservedObject var sync: PhotoSync
-    @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var phase
+    @State private var showingSettings = false
     @State private var chat: PhoneConversation?
     @State private var connection: ConnectionScreen?
     @State private var manualDestination: ManualDestination?
+    @State private var clearTarget: RecentClear?
 
-    private let accent = Color.indigo
     private let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "即图"
-    private var homeTitle: String {
-        guard let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
-              !version.isEmpty else { return appName }
-        return "\(appName) v\(version)"
-    }
+    private let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+    private var paired: Receiver? { sync.receiver.flatMap { $0.pairedAt == nil ? nil : $0 } }
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    statusCard
-                        .listRowInsets(EdgeInsets())
-                        .listRowBackground(Color.clear)
-                }
-
-                if let receiver = sync.receiver {
-                    Section {
-                        Button {
-                            manualDestination = ManualDestination(receiver: receiver)
-                        } label: {
-                            Text("手动发送")
-                                .font(.headline)
-                                .multilineTextAlignment(.center)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 5)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .listRowInsets(EdgeInsets())
-                        .listRowBackground(Color.clear)
-                        .accessibilityIdentifier("manual-photos")
-                    } footer: {
-                        Text("可从系统相册选择照片或视频，确认后发送。")
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    header
+                    if sync.permission != .authorized, paired?.automatic != false {
+                        PhotoAccessNotice(sync: sync)
                     }
-
-                    Section {
-                        Button {
-                            connection = .manual
-                        } label: {
-                            LabeledContent("Mac 接收端", value: receiver.displayAddress)
-                                .foregroundStyle(.primary)
-                        }
-
+                    if let receiver = paired {
+                        pairedCard(receiver)
                         if let chat {
-                            ConversationLink(chat: chat)
-                                .id(ObjectIdentifier(chat))
+                            ConversationLink(chat: chat).id(ObjectIdentifier(chat))
                         }
-                    }
-
-                    Section {
-                        scanButton
-
-                        if receiver.automatic {
-                            Button {
-                                sync.setAutomatic(false)
-                            } label: {
-                                Label("暂停自动同步", systemImage: "pause.circle")
-                            }
-                        } else {
-                            Button {
-                                sync.setAutomatic(true)
-                            } label: {
-                                Label("继续自动同步", systemImage: "play.circle")
-                            }
+                        if let message = sync.errorMessage {
+                            Label(message, systemImage: "exclamationmark.circle")
+                                .font(.footnote).foregroundStyle(.secondary)
                         }
-                        if #available(iOS 27.0, *) {
-                            NavigationLink {
-                                ScreenshotAutomationGuide()
-                            } label: {
-                                Label("设置后台截屏同步", systemImage: "bolt.circle")
-                            }
+                        receipts
+                    } else {
+                        if sync.receiver != nil {
+                            Label("已保存连接，等待 Mac 验证", systemImage: "clock").font(.subheadline)
+                            Button("验证已保存的连接") { connection = .manual }
                         }
-                    } footer: {
-                        if !receiver.automatic {
-                            Text("继续后会补传配对成功后尚未同步的新截图。")
-                        } else if #available(iOS 27.0, *) {
-                            Text("要在其他 App 中截屏后立即发送，请设置一次后台截屏同步。")
-                        } else {
-                            Text("返回即图会立即检查待传截图，后台补传由 iOS 调度。")
+                        welcome
+                        if let error = sync.errorMessage {
+                            Label(error, systemImage: "exclamationmark.circle").font(.subheadline)
                         }
-                    }
-
-                    Section("最近传输") {
-                        LabeledContent("已同步", value: "\(sync.sentCount) 项")
-                        LabeledContent("上次同步", value: lastSentLabel)
-                    }
-
-                    if sync.permission != .authorized {
-                        Section {
-                            photoAccess
-                        } footer: {
-                            Text(photoAccessExplanation)
-                        }
-                    }
-                } else {
-                    Section {
-                        scanButton
-                        Button {
-                            connection = .manual
-                        } label: {
-                            Label("手动配对", systemImage: "keyboard")
-                        }
-                    } footer: {
-                        Text("两台设备连接同一网络后，在 Mac 上打开「\(appName)」，点击「扫码配对」显示二维码。")
                     }
                 }
-
-                if let errorMessage = sync.errorMessage {
-                    Section {
-                        Label(errorMessage, systemImage: "exclamationmark.circle")
-                            .font(.subheadline)
-                            .foregroundStyle(.orange)
+                .padding(.horizontal, 20).padding(.bottom, 18)
+                .frame(maxWidth: 620)
+                .frame(maxWidth: .infinity)
+            }
+            .background(RelayStyle.canvas.ignoresSafeArea())
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if let receiver = paired {
+                    Button { manualDestination = ManualDestination(receiver: receiver) } label: {
+                        Label("手动发送", systemImage: "photo.on.rectangle")
+                            .modifier(DockButtonLabel())
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("manual-photos")
+                    .padding(.horizontal, 14).padding(.bottom, 4)
+                    .frame(maxWidth: 620)
                 }
             }
-            .navigationTitle(homeTitle)
-            .tint(accent)
-            .sheet(item: $connection) { screen in
-                ConnectionForm(sync: sync, screen: screen)
-                    .tint(accent)
+            .navigationDestination(isPresented: $showingSettings) { settings }
+            .toolbar(.hidden, for: .navigationBar)
+        }
+        .tint(RelayStyle.accent)
+        .sheet(item: $connection) { screen in
+            ConnectionForm(sync: sync, screen: screen).tint(RelayStyle.accent)
+        }
+        .sheet(item: $manualDestination) { destination in
+            ManualSelectionSheet(sync: sync, destination: destination.receiver)
+                .presentationDetents([.large]).presentationDragIndicator(.visible)
+                .tint(RelayStyle.accent)
+        }
+        .alert("清除最近传输记录？", isPresented: Binding(
+            get: { clearTarget != nil },
+            set: { if !$0 { clearTarget = nil } }
+        ), presenting: clearTarget) { target in
+            Button("取消", role: .cancel) { }
+            Button("清除记录", role: .destructive) {
+                sync.clearRecent(ids: target.ids, for: target.receiver)
             }
-            .sheet(item: $manualDestination) { destination in
-                ManualSelectionSheet(sync: sync, destination: destination.receiver)
-                    .tint(accent)
-            }
+        } message: { target in
+            Text("将清除发往「\(target.receiver.displayName)」的 \(target.ids.count) 条最近记录。手机原件和 Mac 上的文件都会保留。")
         }
         .onChange(of: sync.receiver, initial: true) { _, receiver in
+            if clearTarget?.receiver.historyKey != receiver?.historyKey { clearTarget = nil }
             let paired = receiver.flatMap { $0.pairedAt == nil ? nil : $0 }
+            if paired == nil { showingSettings = false }
             guard chat?.receiver.historyKey != paired?.historyKey ||
                   chat?.receiver.displayAddress != paired?.displayAddress else { return }
             chat?.action?.cancel()
@@ -169,88 +164,268 @@ private struct SyncHome: View {
         }
     }
 
-    private var scanButton: some View {
-        Button {
-            connection = .scan
-        } label: {
-            Label(sync.receiver == nil ? "扫一扫配对" : "扫码更换 Mac", systemImage: "qrcode.viewfinder")
-        }
-        .accessibilityIdentifier("scan-mac")
-    }
-
-    private var statusCard: some View {
-        let current = status
-        return VStack(alignment: .leading, spacing: 14) {
-            Image(systemName: "iphone.and.arrow.forward")
-                .font(.system(size: 30, weight: .medium))
-                .foregroundStyle(accent)
-                .accessibilityHidden(true)
-
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 8) {
-                    Text(current.title)
-                        .font(.title2.weight(.semibold))
-                    Circle()
-                        .fill(current.color)
-                        .frame(width: 10, height: 10)
-                        .accessibilityHidden(true)
+    private var header: some View {
+        HStack(alignment: .center) {
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                Text(appName).font(.largeTitle.bold())
+                if let version { Text("v\(version)").font(.caption.weight(.medium)).foregroundStyle(.secondary) }
+            }
+            .accessibilityElement(children: .combine)
+            Spacer()
+            if paired != nil {
+                Button { showingSettings = true } label: {
+                    Image(systemName: "gearshape").font(.body.weight(.medium)).frame(width: 44, height: 44)
+                        .background(Color.secondary.opacity(0.09), in: Circle())
                 }
-                Text(statusDetail)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                .accessibilityLabel("连接与同步设置")
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(23)
-        .background(accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 24))
-        .accessibilityElement(children: .combine)
+        .padding(.top, 8)
     }
 
-    private var status: (title: String, color: Color) {
-        guard let receiver = sync.receiver else { return ("连接你的 Mac", .red) }
-        if receiver.pairedAt == nil {
-            return (sync.working ? "正在验证连接" : "等待 Mac 验证", .red)
-        }
-        if !receiver.automatic { return ("自动同步已暂停", .red) }
-        if !sync.canReadPhotos { return ("等待相册授权", .red) }
-        if sync.errorMessage == PhotoSync.connectionError { return ("已配对 · Mac 暂不可达", .red) }
-        if sync.errorMessage != nil { return ("自动同步需要处理", .red) }
-        if sync.working { return ("正在自动同步", .green) }
-        if sync.permission == .limited { return ("自动同步 · 照片权限有限", .green) }
-        return ("自动同步已开启", .green)
-    }
-
-    private var statusDetail: String {
-        guard let receiver = sync.receiver else { return "通过局域网把截图、照片和视频发送到 Mac。" }
-        guard let pairedAt = receiver.pairedAt else { return "连接成功后，才会开始记录新截图。" }
-        let date = pairedAt.formatted(date: .abbreviated, time: .shortened)
-        return "仅自动同步 \(date) 配对成功后截取的新截图。"
-    }
-
-    private var lastSentLabel: String {
-        sync.lastSent?.formatted(date: .abbreviated, time: .shortened) ?? "尚无记录"
-    }
-
-    private var photoAccessExplanation: String {
-        if sync.permission == .limited { return "当前只会同步获准访问的截图。允许完全访问后，新截图可以自动加入同步。" }
-        return "允许访问相册后会自动识别新截图。也可先通过系统相册手动发送。"
-    }
-
-    private var photoAccess: some View {
-        Button {
-            if sync.permission == .notDetermined {
-                Task { await sync.requestPhotoAccess() }
-            } else if let settings = URL(string: UIApplication.openSettingsURLString) {
-                openURL(settings)
+    private var welcome: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 14) {
+                Label("尚未配对", systemImage: "link").font(.caption.weight(.semibold))
+                Image(systemName: "desktopcomputer")
+                    .font(.system(size: 62, weight: .light)).foregroundStyle(.white.opacity(0.9))
+                    .overlay(alignment: .center) {
+                        Image(systemName: "qrcode").font(.system(size: 20)).offset(y: -7)
+                    }
+                    .frame(maxWidth: .infinity).padding(.vertical, 8)
+                    .accessibilityHidden(true)
+                Text("连接你的 Mac").font(.title.bold())
+                Text("配对后，新截的图会自动传到 Mac。").font(.subheadline)
+                Button { connection = .scan } label: {
+                    Label("扫码连接 Mac", systemImage: "qrcode.viewfinder")
+                        .font(.headline).frame(maxWidth: .infinity, minHeight: 46)
+                }
+                .buttonStyle(.plain).foregroundStyle(RelayStyle.green)
+                .background(.white, in: RoundedRectangle(cornerRadius: 14))
+                .accessibilityIdentifier("scan-mac")
             }
-        } label: {
-            Label(sync.permission == .notDetermined ? "允许访问照片" : "管理照片权限", systemImage: "photo.on.rectangle")
+            .padding(20).foregroundStyle(.white)
+            .background(RelayStyle.card, in: RoundedRectangle(cornerRadius: 24))
+            Button("手动输入地址和配对码") { connection = .manual }
+                .font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity, minHeight: 44)
+                .accessibilityIdentifier("manual-pairing")
+            Text("在 Mac 上打开配对码").font(.headline)
+            Label("让手机和 Mac 接入同一局域网。", systemImage: "wifi")
+            Label("在 Mac 版即图右上角点「扫码配对」。", systemImage: "qrcode")
         }
+        .font(.subheadline)
+    }
+
+    private func automaticStatus(for receiver: Receiver) -> String {
+        if !receiver.automatic { return "自动同步已暂停" }
+        if sync.permission == .limited { return "自动同步 · 仅限所选照片" }
+        return sync.canReadPhotos ? "自动同步已开启" : "自动同步待授权"
+    }
+
+    private func pairedCard(_ receiver: Receiver) -> some View {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack(alignment: .center, spacing: 8) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("已配对设备 · \(receiver.macProfile?.familyName ?? "Mac")", systemImage: "link")
+                        .font(.caption.weight(.medium))
+                    Text(receiver.displayName).font(.title2.bold()).privacySensitive()
+                    Text(sync.errorMessage == PhotoSync.connectionError ? "暂时无法连接" :
+                            sync.lastSent.map { "上次送达 \(Self.time($0))" } ?? "等待首次传输")
+                        .font(.footnote)
+                }
+                Spacer(minLength: 0)
+                Image(receiver.macProfile?.artwork ?? "receiver_mac")
+                    .resizable().scaledToFit().frame(maxWidth: 100, maxHeight: 78)
+                    .accessibilityHidden(true)
+            }
+            Button { connection = .scan } label: {
+                Label("扫码更换 Mac", systemImage: "qrcode.viewfinder").font(.subheadline.weight(.medium))
+                    .padding(.horizontal, 12).frame(minHeight: 40)
+            }
+            .buttonStyle(.plain)
+            .background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+            .accessibilityIdentifier("scan-mac")
+            Divider().overlay(.white.opacity(0.28))
+            HStack(spacing: 8) {
+                Circle().fill(receiver.automatic ? Color.mint : Color(red: 1, green: 0.44, blue: 0.40))
+                    .frame(width: 9, height: 9).accessibilityHidden(true)
+                Text(automaticStatus(for: receiver))
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Button(receiver.automatic ? "暂停" : "继续") { sync.setAutomatic(!receiver.automatic) }
+                    .font(.subheadline.weight(.semibold)).buttonStyle(.bordered)
+                    .tint(.white).accessibilityLabel(receiver.automatic ? "暂停自动同步" : "继续自动同步")
+            }
+        }
+        .padding(20).foregroundStyle(.white)
+        .background(RelayStyle.card, in: RoundedRectangle(cornerRadius: 24))
+    }
+
+    private static func time(_ date: Date) -> String {
+        date.formatted(date: Calendar.current.isDateInToday(date) ? .omitted : .abbreviated, time: .shortened)
+    }
+
+    private var receipts: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("最近传输").font(.title3.bold())
+                if sync.sentCount > 0 { Text("累计 \(sync.sentCount) 项").font(.caption).foregroundStyle(.secondary) }
+                Spacer()
+                if let receiver = paired, !sync.recent.isEmpty {
+                    Button {
+                        clearTarget = RecentClear(receiver: receiver, ids: Set(sync.recent.map(\.id)))
+                    } label: {
+                        Text("清除记录").font(.subheadline).frame(minHeight: 44).contentShape(Rectangle())
+                    }
+                    .accessibilityIdentifier("clear-recent-transfers")
+                }
+            }
+            .padding(.bottom, 10)
+            if sync.recent.isEmpty {
+                Text(sync.sentCount == 0 ? "截图或手动发送后，可在这里查看送达记录。" : "新的送达记录会显示在这里。")
+                    .font(.subheadline).foregroundStyle(.secondary).padding(.vertical, 10)
+            }
+            ForEach(sync.recent) { receipt in
+                HStack(spacing: 12) {
+                    Group {
+                        if let bytes = receipt.thumbnail, let thumbnail = UIImage(data: bytes) {
+                            Image(uiImage: thumbnail).resizable().scaledToFill()
+                        } else {
+                            Image(systemName: receipt.kind == .video ? "film" : "photo")
+                                .foregroundStyle(RelayStyle.accent)
+                        }
+                    }
+                    .frame(width: 43, height: 49)
+                    .background(RelayStyle.accent.opacity(0.07)).clipShape(.rect(cornerRadius: 7))
+                    .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(receipt.captured.map { "截图 \($0.formatted(date: .omitted, time: .standard))" } ?? (receipt.kind == .video ? "视频" : "照片"))
+                            .font(.subheadline.weight(.semibold))
+                        Text("\(receipt.kind == .screenshot ? "自动同步" : "手动发送") · \(ByteCountFormatter.string(fromByteCount: Int64(receipt.bytes), countStyle: .file))")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 3)
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Text(Self.time(receipt.delivered)).font(.caption.monospacedDigit())
+                        Label("已送达", systemImage: "checkmark").font(.caption2).foregroundStyle(RelayStyle.accent)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                .padding(.vertical, 9)
+                Divider()
+            }
+        }
+    }
+
+    private var settings: some View {
+        Form {
+            if let receiver = sync.receiver {
+                Section("接收设备") {
+                    LabeledContent("名称", value: receiver.displayName)
+                    LabeledContent("局域网地址", value: receiver.displayAddress).privacySensitive()
+                    Button("手动配对") { connection = .manual }
+                }
+                Section {
+                    Toggle("自动同步新截图", isOn: Binding(get: { sync.receiver?.automatic ?? false }, set: sync.setAutomatic))
+                    if let date = receiver.pairedAt {
+                        Text("仅同步 \(date.formatted(date: .abbreviated, time: .shortened)) 配对后截取的新图。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                    if #available(iOS 27.0, *) {
+                        NavigationLink("后台截屏同步") { ScreenshotAutomationGuide() }
+                    }
+                } header: { Text("自动同步") } footer: {
+                    Text("暂停后仍可手动发送照片和视频。")
+                }
+                if sync.permission != .authorized {
+                    Section {
+                        PhotoAccessNotice(sync: sync)
+                            .listRowInsets(EdgeInsets())
+                            .listRowBackground(Color.clear)
+                    }
+                }
+            }
+        }
+        .navigationTitle("连接与同步").navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
     }
 
     private struct ManualDestination: Identifiable {
         let id = UUID()
         let receiver: Receiver
+    }
+}
+
+private struct PhotoAccessNotice: View {
+    @ObservedObject var sync: PhotoSync
+    @Environment(\.openURL) private var openURL
+    @Environment(\.colorScheme) private var scheme
+    @State private var requesting = false
+
+    private var message: (title: String, detail: String) {
+        switch sync.permission {
+        case .notDetermined:
+            ("自动同步需要照片权限", "在接下来的系统弹窗中选择「完全访问」，即图就能读取配对后新截的图，并发送到你的 Mac。")
+        case .limited:
+            ("当前只能访问部分照片", "即图只能读取你选过的照片。要自动发现新截图，请在系统设置的「照片」中改为「完全访问」。")
+        case .denied:
+            ("照片权限已关闭", "自动同步暂时无法读取新截图。请在系统设置中点「照片」，选择「完全访问」。")
+        case .restricted:
+            ("照片访问受系统限制", "请检查屏幕使用时间或设备管理限制。解除限制后，即图才能自动读取新截图。")
+        default:
+            ("检查照片访问权限", "请在系统设置的「照片」中查看即图的访问权限。")
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label {
+                Text(message.title)
+            } icon: {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .foregroundStyle(scheme == .dark ? Color.orange : Color(red: 0.60, green: 0.31, blue: 0.05))
+            }
+            .font(.headline)
+            .accessibilityAddTraits(.isHeader)
+            Text(message.detail)
+                .font(.subheadline)
+                .fixedSize(horizontal: false, vertical: true)
+            if sync.permission != .restricted {
+                Button {
+                    if sync.permission == .notDetermined {
+                        guard !requesting else { return }
+                        requesting = true
+                        Task {
+                            await sync.requestPhotoAccess()
+                            requesting = false
+                        }
+                    } else if let url = URL(string: UIApplication.openSettingsURLString) {
+                        openURL(url)
+                    }
+                } label: {
+                    Text(sync.permission == .notDetermined ? "开启照片访问" : "打开系统设置")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity, minHeight: 46)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white)
+                .background(RelayStyle.green, in: RoundedRectangle(cornerRadius: 13))
+                .disabled(requesting)
+                .accessibilityIdentifier("photo-access-action")
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .foregroundStyle(.primary)
+        .background {
+            RoundedRectangle(cornerRadius: 18)
+                .fill(scheme == .dark ? Color(red: 0.19, green: 0.16, blue: 0.11) : Color(red: 1, green: 0.96, blue: 0.87))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 18).strokeBorder(.orange.opacity(0.42))
+                .allowsHitTesting(false)
+        }
     }
 }
 
@@ -295,7 +470,7 @@ private struct ConnectionForm: View {
 
     var body: some View {
         if screen == .scan {
-            PairingScanner(manual: { screen = .manual }) { text in
+            PairingScanner(currentMacName: sync.receiver?.displayName, manual: { screen = .manual }) { text in
                 screen = .manual
                 startConnection(qr: text)
             }
@@ -323,7 +498,7 @@ private struct ConnectionForm: View {
                         errorMessage = nil
                         screen = .scan
                     } label: {
-                        Label("扫一扫配对", systemImage: "qrcode.viewfinder")
+                        Label(sync.receiver == nil ? "扫码连接 Mac" : "扫码更换 Mac", systemImage: "qrcode.viewfinder")
                     }
                     .disabled(connecting)
                     .accessibilityIdentifier("scan-pairing-code")
@@ -439,55 +614,63 @@ private struct ManualSelectionSheet: View {
     @State private var selection: [PhotosPickerItem] = []
     @State private var remaining: [PhotosPickerItem] = []
     @State private var transfer: Task<Void, Never>?
-    @State private var completed = 0
+    @State private var attemptID: UUID?
+    @State private var progress = PhotoSync.ManualUploadProgress(item: 1)
     @State private var summary: String?
     @State private var errorMessage: String?
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    LabeledContent("发送到 Mac", value: destination.displayAddress)
-                    if remaining.isEmpty, summary == nil {
-                        Text("从系统相册选择要发送的照片或视频。")
-                            .foregroundStyle(.secondary)
-                    } else if !remaining.isEmpty {
-                        Text("已选 \(remaining.count) 项")
-                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack {
+                        Image(systemName: "desktopcomputer").foregroundStyle(RelayStyle.accent)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("发送到").font(.caption).foregroundStyle(.secondary)
+                            Text(destination.macProfile != nil ? destination.displayName : destination.displayAddress)
+                                .font(.headline).privacySensitive()
+                        }
+                        Spacer()
+                    }
+                    if !remaining.isEmpty {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 82, maximum: 128))], alignment: .leading, spacing: 8) {
                             ForEach(Array(remaining.enumerated()), id: \.offset) { _, item in
                                 SelectedMediaThumbnail(item: item)
                             }
                         }
+                        Text(selectionSummary).font(.headline)
                     }
-                }
-
-                if let summary {
-                    Section {
-                        Label(summary, systemImage: "checkmark.circle")
-                    }
-                }
-
-                Section {
-                    if transfer != nil {
-                        ProgressView(value: Double(completed), total: Double(max(1, remaining.count))) {
-                            Text("正在发送 \(completed)/\(remaining.count)")
-                        }
-                        Button("停止本次发送", role: .destructive) { transfer?.cancel() }
-                    } else {
-                        if !remaining.isEmpty {
-                            Button(errorMessage == nil ? "发送 \(remaining.count) 项" : "重试 \(remaining.count) 项") {
-                                send()
-                            }
-                            .accessibilityIdentifier("send-picked-photos")
-                        }
-                        Button("选择照片或视频") { showingPicker = true }
-                            .accessibilityIdentifier("open-photo-picker")
+                    if let summary {
+                        Label(summary, systemImage: "checkmark.circle").foregroundStyle(RelayStyle.accent)
                     }
                     if let errorMessage {
-                        Text(errorMessage)
-                            .font(.subheadline)
-                            .foregroundStyle(.orange)
+                        Label(errorMessage, systemImage: "exclamationmark.circle").font(.subheadline)
                     }
+                    if transfer == nil {
+                        Button(remaining.isEmpty ? "选择照片或视频" : "重新选择") { showingPicker = true }
+                            .accessibilityIdentifier("open-photo-picker")
+                    }
+                }
+                .padding(20).frame(maxWidth: 620, alignment: .leading)
+                .frame(maxWidth: .infinity)
+            }
+            .background(RelayStyle.canvas.ignoresSafeArea())
+            .safeAreaInset(edge: .bottom) {
+                if transfer != nil {
+                    VStack(alignment: .leading, spacing: 8) {
+                        transferProgress
+                        Button("停止本次发送", role: .destructive) { transfer?.cancel() }
+                    }
+                    .padding(8).frame(maxWidth: 620, alignment: .leading)
+                    .modifier(RelayDock()).padding(.horizontal, 14)
+                } else if !remaining.isEmpty {
+                    Button { send() } label: {
+                        Text(errorMessage == nil ? "发送 \(remaining.count) 项" : "重试 \(remaining.count) 项")
+                            .modifier(DockButtonLabel())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("send-picked-photos")
+                    .padding(.horizontal, 14)
                 }
             }
             .navigationTitle("确认发送")
@@ -505,7 +688,6 @@ private struct ManualSelectionSheet: View {
             )
             .onChange(of: selection) { _, items in
                 remaining = items
-                completed = 0
                 summary = nil
                 errorMessage = nil
             }
@@ -519,13 +701,49 @@ private struct ManualSelectionSheet: View {
         }
     }
 
+    @ViewBuilder
+    private var transferProgress: some View {
+        let position = "第 \(progress.item)/\(remaining.count) 项"
+        if let total = progress.total, total > 0, progress.sent < total {
+            let sent = ByteCountFormatter.string(fromByteCount: progress.sent, countStyle: .file)
+            let size = ByteCountFormatter.string(fromByteCount: total, countStyle: .file)
+            let percent = progress.sent * 100 / total
+            ProgressView(value: Double(progress.sent), total: Double(total)) {
+                Text("正在上传\(position) · \(percent)%")
+            } currentValueLabel: {
+                Text("\(sent) / \(size)")
+            }
+            .accessibilityIdentifier("manual-upload-progress")
+        } else {
+            HStack {
+                ProgressView().controlSize(.small)
+                Text(progress.total == nil ? "正在准备\(position)" : "\(position)已上传，等待 Mac 确认")
+            }
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    private var selectionSummary: String {
+        let videos = remaining.filter(\.isVideoSelection).count
+        let photos = remaining.count - videos
+        return [photos > 0 ? "\(photos) 张照片" : nil, videos > 0 ? "\(videos) 个视频" : nil]
+            .compactMap { $0 }.joined(separator: " · ")
+    }
+
     private func send() {
         guard transfer == nil, !remaining.isEmpty else { return }
         let items = remaining
         errorMessage = nil
-        completed = 0
+        let attempt = UUID()
+        attemptID = attempt
+        progress = PhotoSync.ManualUploadProgress(item: 1)
         transfer = Task {
-            let result = await sync.sendSelection(items, to: destination) { completed = $0 }
+            let result = await sync.sendSelection(items, to: destination) { update in
+                guard attemptID == attempt, update.item >= progress.item else { return }
+                guard update.item != progress.item || update.sent >= progress.sent else { return }
+                progress = update
+            }
+            attemptID = nil
             remaining = result.remaining
             if result.sent > 0 {
                 summary = "已发送 \(result.sent) 项"
@@ -534,6 +752,7 @@ private struct ManualSelectionSheet: View {
             }
             errorMessage = result.message
             transfer = nil
+            if result.sent > 0, result.remaining.isEmpty, result.message == nil { dismiss() }
         }
     }
 }

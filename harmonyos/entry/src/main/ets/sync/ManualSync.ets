@@ -1,3 +1,4 @@
+import { Delivery, recordDelivery } from './RecentTransfers';
 import { common } from '@kit.AbilityKit';
 import { dataSharePredicates } from '@kit.ArkData';
 import { fileIo } from '@kit.CoreFileKit';
@@ -90,7 +91,7 @@ export async function sendSelection(
           receiver = new Receiver(pairing.host, pairing.token);
           cancellation.attach(receiver);
         }
-        const error: string | undefined = await sendVideo(context, pairing, receiver, item.uri, video, isCurrent);
+        const error: string | undefined = await sendVideo(context, pairing, receiver, item, video, isCurrent);
         if (error === undefined) {
           result.completed.push(item.uri);
         } else if (!isCurrent()) {
@@ -128,7 +129,7 @@ export async function sendSelection(
         receiver = new Receiver(pairing.host, pairing.token);
         cancellation.attach(receiver);
       }
-      const sent = await uploadImage(context, pairing, receiver, format, bytes, isCurrent);
+      const sent = await uploadImage(context, pairing, receiver, format, bytes, isCurrent, item.name, true);
       if (sent !== undefined) {
         result.completed.push(item.uri);
       } else if (!isCurrent()) {
@@ -148,7 +149,7 @@ export async function sendSelection(
 }
 
 async function sendVideo(
-  context: common.Context, pairing: Pairing, receiver: Receiver, uri: string, format: MediaFormat,
+  context: common.Context, pairing: Pairing, receiver: Receiver, item: SelectedMedia, format: MediaFormat,
   isCurrent: () => boolean
 ): Promise<string | undefined> {
   let file: fileIo.File | undefined;
@@ -157,7 +158,7 @@ async function sendVideo(
     let hex: string;
     try {
       // Keep the picker-granted descriptor open until the native HTTP upload has finished.
-      file = fileIo.openSync(uri, fileIo.OpenMode.READ_ONLY);
+      file = fileIo.openSync(item.uri, fileIo.OpenMode.READ_ONLY);
       size = (await fileIo.stat(file.fd)).size;
       if (!Number.isSafeInteger(size) || size <= 0 || size > MAX_VIDEO_BYTES) {
         return '视频为空或超过 512 MiB';
@@ -180,6 +181,8 @@ async function sendVideo(
       return 'Mac 无法保存该视频，请确认接收端已更新且支持该格式';
     }
     markReceipt(receipt);
+    await recordDelivery(context, pairing,
+      new Delivery(hex, item.name || filename, size, Date.now(), true, true), undefined, item.thumbnail);
     return undefined;
   } finally {
     if (file) {

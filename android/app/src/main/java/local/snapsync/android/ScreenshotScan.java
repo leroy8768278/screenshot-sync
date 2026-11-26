@@ -95,7 +95,7 @@ final class ScreenshotScan implements AutoCloseable {
                     if (cancelled()) {
                         return Outcome.COMPLETE;
                     }
-                    int test = receiver.test();
+                    int test = receiver.test().status();
                     if (test != 200) {
                         return serverError(test);
                     }

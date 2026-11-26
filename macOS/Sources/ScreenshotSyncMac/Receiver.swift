@@ -169,10 +169,18 @@ private final class UploadConnection: @unchecked Sendable {
         let body = Data(header[end.upperBound...])
         header.removeAll(keepingCapacity: false)
         if request.method == "GET", request.path == "/v1/health" {
-            if let authorization = request.headers["authorization"], !authorized(authorization) {
+            guard let authorization = request.headers["authorization"] else {
+                respond(200, "ok", key: "status")
+                return
+            }
+            if !authorized(authorization) {
                 respond(401, "invalid_pairing_code")
             } else {
-                respond(200, "ok", key: "status")
+                do {
+                    try sendJSON(["status": "ok", "macName": Self.computerName, "macFamily": MacFamily.current.rawValue])
+                } catch {
+                    respond(200, "ok", key: "status")
+                }
             }
             return
         }
@@ -434,6 +442,8 @@ private final class UploadConnection: @unchecked Sendable {
 }
 
 private extension UploadConnection {
+    static var computerName: String { SCDynamicStoreCopyComputerName(nil, nil) as String? ?? "Mac" }
+
     struct MessagePage: Encodable {
         let messages: [ConversationMessage]
         let hasMore: Bool
@@ -462,8 +472,7 @@ private extension UploadConnection {
                     // Restore a missed pairing announcement even if this phone has never sent a screenshot.
                     onDeviceInfo(device, profile, false)
                 }
-                let name = SCDynamicStoreCopyComputerName(nil, nil) as String? ?? "Mac"
-                try sendJSON(MessagePage(messages: page.messages, hasMore: page.hasMore, macName: name))
+                try sendJSON(MessagePage(messages: page.messages, hasMore: page.hasMore, macName: Self.computerName))
             case ("GET", let path) where path.hasPrefix("/v1/chat/files/"):
                 guard route.count == 1, let id = UUID(uuidString: String(path.dropFirst("/v1/chat/files/".count)))
                 else { respond(404, "file_not_found"); return }

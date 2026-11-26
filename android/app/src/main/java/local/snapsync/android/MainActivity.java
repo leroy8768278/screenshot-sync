@@ -63,13 +63,9 @@ public final class MainActivity extends Activity {
     private static final int PICK_MEDIA = 2;
     private static final int REQUEST_NOTIFICATIONS = 3;
     private static final int SCAN_PAIRING = 4;
-    private static final int BACKGROUND = 0xfff3f6fb;
-    private static final int INK = 0xff172641;
-    private static final int MUTED = 0xff52617a;
-    private static final int ACCENT = 0xff2457c6;
-    private static final int BORDER = 0xffd8e0ed;
-    private static final int FIELD = 0xfff8faff;
-    private static final int ERROR = 0xffa3262e;
+    int ink, muted, paper, panel, border, accent, tint, primary, error;
+    private static final int HERO_TEXT = 0xfff5fbf6;
+    private static final int HERO_HINT = 0xffcee3d8;
     private static final int HOST_ID = View.generateViewId();
     private static final int CODE_ID = View.generateViewId();
 
@@ -86,7 +82,10 @@ public final class MainActivity extends Activity {
         }
     };
     private final SharedPreferences.OnSharedPreferenceChangeListener statusListener = (prefs, key) -> {
-        if (SyncSettings.STATUS.equals(key)) {
+        if (DeliveryReceipts.UPDATED.equals(key)) {
+            healthError = "";
+            refreshRecent(SyncSettings.read(this));
+        } else if (SyncSettings.STATUS.equals(key)) {
             showSavedStatus();
         } else if (SyncSettings.LIVE_ENABLED.equals(key)) {
             refreshSyncControls();
@@ -96,11 +95,21 @@ public final class MainActivity extends Activity {
         }
     };
 
+    private LinearLayout pairingIntro, manualForm, dock, recentRows, receiverSettings;
+    private String healthError = "";
+    private TextView receiverKind, lastReceipt, receiptCount, switchDot, settingsDetails, connectionIssue;
+    private Button manualFormButton, clearRecentButton;
+    private List<String> recentIds = Collections.emptyList();
+    private long receiptRequest;
+    private String receiptOwner = "";
+    private boolean manualFormOpen;
+
     private EditText hostInput;
     private EditText codeInput;
     private LinearLayout pairingPanel;
     private LinearLayout syncPanel;
-    private TextView connectedReceiver;
+    private TextView receiverName;
+    private ImageView receiverArt;
     private TextView syncMode;
     private TextView testStatus;
     private TextView syncStatus;
@@ -129,7 +138,7 @@ public final class MainActivity extends Activity {
     private ManualSend manual;
     private DeviceChat chat;
     private ScrollView home;
-    private OnBackInvokedCallback chatBack;
+    private OnBackInvokedCallback detailBack;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -137,6 +146,19 @@ public final class MainActivity extends Activity {
         SyncScheduler.cancelLegacyScan(this);
         if (Build.VERSION.SDK_INT >= 30) {
             getWindow().setDecorFitsSystemWindows(false);
+        }
+        paper = getColor(R.color.glass_paper);
+        ink = getColor(R.color.glass_ink);
+        muted = getColor(R.color.glass_muted);
+        accent = getColor(R.color.glass_accent);
+        primary = getColor(R.color.glass_primary);
+        border = getColor(R.color.glass_outline);
+        panel = getColor(R.color.glass_panel);
+        tint = getColor(R.color.glass_tint);
+        error = getColor(R.color.glass_error);
+        if (savedInstanceState != null) {
+            editingConnection = savedInstanceState.getBoolean("connection_editor");
+            manualFormOpen = savedInstanceState.getBoolean("manual_form");
         }
         setContentView(buildContent());
 
@@ -168,23 +190,40 @@ public final class MainActivity extends Activity {
         }
         home.setVisibility(show ? View.GONE : View.VISIBLE);
         chat.page.setVisibility(show ? View.VISIBLE : View.GONE);
+        dock.setVisibility(!show && !editingConnection && SyncSettings.read(this).isVerified() ? View.VISIBLE : View.GONE);
         if (show) { chat.page.requestFocus(); }
-        if (Build.VERSION.SDK_INT >= 33) {
-            if (show) {
-                chatBack = chat::returnHome;
-                getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
-                    OnBackInvokedDispatcher.PRIORITY_DEFAULT, chatBack);
-            } else {
-                getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(chatBack);
-                chatBack = null;
-            }
+        updateBackNavigation();
+    }
+
+    private void updateBackNavigation() {
+        if (Build.VERSION.SDK_INT < 33) { return; }
+        boolean detail = chat.isOpen() || editingConnection || manualFormOpen;
+        if (detail && detailBack == null) {
+            detailBack = this::closeDetail;
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                OnBackInvokedDispatcher.PRIORITY_DEFAULT, detailBack);
+        } else if (!detail && detailBack != null) {
+            getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(detailBack);
+            detailBack = null;
+        }
+    }
+
+    private void closeDetail() {
+        if (chat.isOpen()) {
+            chat.returnHome();
+        } else {
+            editingConnection = false;
+            manualFormOpen = false;
+            testStatus.setVisibility(View.GONE);
+            refreshSyncControls();
+            home.smoothScrollTo(0, 0);
         }
     }
 
     @Override
-    @SuppressLint("GestureBackNavigation") // The window callback above handles API 33+.
+    @SuppressLint("GestureBackNavigation")
     public void onBackPressed() {
-        if (chat.isOpen()) { chat.returnHome(); }
+        if (chat.isOpen() || editingConnection || manualFormOpen) { closeDetail(); }
         else { super.onBackPressed(); }
     }
 
@@ -198,6 +237,8 @@ public final class MainActivity extends Activity {
     protected void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state);
         chat.save(state);
+        state.putBoolean("connection_editor", editingConnection);
+        state.putBoolean("manual_form", manualFormOpen);
         state.putString("picker_session", pickerSession);
         state.putString("selected_session", selectedSession);
         state.putParcelableArrayList("selected_images", selectedMedia);
@@ -208,6 +249,35 @@ public final class MainActivity extends Activity {
         super.onStart();
         SyncSettings.preferences(this).registerOnSharedPreferenceChangeListener(statusListener);
         showSavedStatus();
+        refreshRecent(SyncSettings.read(this));
+        SyncSettings.Pairing pairing = SyncSettings.read(this);
+        if (pairing.isVerified()) {
+            connectionExecutor.execute(() -> refreshReceiverProfile(pairing));
+        }
+    }
+
+    private void refreshReceiverProfile(SyncSettings.Pairing pairing) {
+        try (ReceiverConnection receiver = new ReceiverConnection(this, pairing.host(), pairing.code())) {
+            ReceiverConnection.Health health = receiver.test();
+            if (health.status() == 200) { SyncSettings.updateMac(this, pairing, health.mac()); }
+            String issue = switch (health.status()) {
+                case 200 -> "";
+                case 401, 403 -> getString(R.string.status_bad_code);
+                default -> getString(R.string.status_rejected, health.status());
+            };
+            receiverHealth(pairing, issue);
+        } catch (IOException unavailable) {
+            receiverHealth(pairing, getString(R.string.status_network));
+        }
+    }
+
+    private void receiverHealth(SyncSettings.Pairing pairing, String message) {
+        runOnUiThread(() -> {
+            if (!isDestroyed() && !isFinishing() && SyncSettings.read(this).sameSession(pairing)) {
+                healthError = message;
+                refreshSyncControls();
+            }
+        });
     }
 
     @Override
@@ -266,7 +336,7 @@ public final class MainActivity extends Activity {
 
     private View buildContent() {
         FrameLayout screens = new FrameLayout(this);
-        screens.setBackgroundColor(BACKGROUND);
+        screens.setBackgroundColor(paper);
         home = new ScrollView(this);
         home.setFillViewport(true);
         screens.addView(home);
@@ -288,7 +358,7 @@ public final class MainActivity extends Activity {
 
         LinearLayout page = column();
         page.setFocusableInTouchMode(true);
-        page.setPadding(dp(20), dp(26), dp(20), dp(26));
+        page.setPadding(dp(20), dp(18), dp(20), dp(100));
         int contentWidth = getResources().getDisplayMetrics().widthPixels;
         FrameLayout.LayoutParams pageParams = new FrameLayout.LayoutParams(
             Math.min(contentWidth, dp(580)), FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
@@ -296,40 +366,89 @@ public final class MainActivity extends Activity {
 
         LinearLayout heading = row();
         heading.setGravity(Gravity.START | Gravity.TOP);
-        TextView title = label(R.string.app_name, 30, INK, true);
+        TextView title = label(R.string.app_name, 30, ink, true);
         title.setAccessibilityHeading(true);
         heading.addView(title);
-        TextView version = label(0, 14, MUTED, false);
+        TextView version = label(0, 14, muted, false);
         version.setText(getString(R.string.app_version, BuildConfig.VERSION_NAME));
         version.setPaddingRelative(dp(8), 0, 0, 0);
         heading.addView(version);
+        heading.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
+        connectionSettings = button(R.string.connection_options, false);
+        connectionSettings.setOnClickListener(view -> {
+            editingConnection = !editingConnection;
+            testStatus.setVisibility(View.GONE);
+            connectionIssue.setVisibility(View.GONE);
+            refreshSyncControls();
+            home.smoothScrollTo(0, 0);
+        });
+        heading.addView(connectionSettings);
         add(page, heading, 0);
-        add(page, label(R.string.subtitle, 14, MUTED, false), 6);
         pairingPanel = pairingCard();
         syncPanel = statusCard();
-        add(page, pairingPanel, 20);
-        add(page, syncPanel, 12);
+        add(page, pairingPanel, 14);
+        add(page, syncPanel, 14);
+        add(page, receiverSettings, 10);
+
+        dock = column();
+        dock.setPadding(dp(8), dp(8), dp(8), dp(8));
+        dock.setBackground(glassSurface(24));
+        dock.setElevation(dp(3));
+        chooseMediaButton = button(R.string.pick_media, true);
+        chooseMediaButton.setOnClickListener(view -> openMediaPicker());
+        add(dock, chooseMediaButton, 0);
+        FrameLayout.LayoutParams dockParams = new FrameLayout.LayoutParams(Math.min(contentWidth - dp(32), dp(548)), -2,
+            Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        dockParams.bottomMargin = dp(8);
+        screens.addView(dock, dockParams);
         screens.addView(chat.page);
         return screens;
     }
 
     private LinearLayout pairingCard() {
-        LinearLayout card = card(R.string.connect_title);
-        add(card, label(R.string.connect_help, 13, MUTED, false), 8);
-        scanButton = button(R.string.scan_pairing, true);
+        LinearLayout wrapper = column();
+        pairingIntro = column();
+        add(wrapper, pairingIntro, 0);
+        LinearLayout hero = hero();
+        add(hero, label(R.string.unpaired_device, 13, HERO_HINT, true), 0);
+        ImageView display = new ImageView(this);
+        display.setImageResource(R.drawable.pairing_display);
+        hero.addView(display, new LinearLayout.LayoutParams(-1, dp(94)));
+        add(hero, label(R.string.pair_first, 26, HERO_TEXT, true), 10);
+        add(hero, label(R.string.pair_intro, 14, HERO_HINT, false), 6);
+        scanButton = heroButton(R.string.scan_pairing, true);
         scanButton.setOnClickListener(view -> scanPairingCode());
-        add(card, scanButton, 12);
-        testStatus = label(0, 13, MUTED, false);
+        add(hero, scanButton, 18);
+        add(pairingIntro, hero, 0);
+        manualFormButton = button(R.string.pair_manual_form, false);
+        manualFormButton.setOnClickListener(v -> {
+            manualFormOpen = !manualFormOpen;
+            refreshSyncControls();
+            if (manualFormOpen) {
+                manualForm.post(() -> manualForm.requestRectangleOnScreen(
+                    new Rect(0, 0, manualForm.getWidth(), manualForm.getHeight()), false));
+            }
+        });
+        add(pairingIntro, manualFormButton, 10);
+        LinearLayout guide = column();
+        guide.setPadding(dp(6), dp(3), dp(6), 0);
+        add(guide, label(R.string.pair_on_mac, 17, ink, true), 0);
+        add(guide, label(R.string.pair_instruction, 14, muted, false), 8);
+        add(pairingIntro, guide, 20);
+        // The paired settings screen shares the same address and pairing-code editor.
+        manualForm = card(R.string.connection_settings);
+        LinearLayout card = manualForm;
+        testStatus = label(0, 13, muted, false);
         testStatus.setVisibility(View.GONE);
         testStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-        add(card, testStatus, 10);
-        TextView addressLabel = label(R.string.host, 13, INK, true);
+        add(wrapper, testStatus, 10);
+        TextView addressLabel = label(R.string.host, 13, ink, true);
         addressLabel.setLabelFor(HOST_ID);
         add(card, addressLabel, 16);
         hostInput = field(HOST_ID, R.string.host_hint, InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         add(card, hostInput, 6);
 
-        TextView codeLabel = label(R.string.code, 13, INK, true);
+        TextView codeLabel = label(R.string.code, 13, ink, true);
         codeLabel.setLabelFor(CODE_ID);
         add(card, codeLabel, 12);
         codeInput = field(CODE_ID, R.string.code_hint,
@@ -361,38 +480,96 @@ public final class MainActivity extends Activity {
         disconnectButton = button(R.string.disconnect, false);
         disconnectButton.setOnClickListener(view -> confirmDisconnect());
         add(card, disconnectButton, 10);
-        return card;
+        add(wrapper, card, 16);
+        return wrapper;
+    }
+
+    private LinearLayout hero() {
+        LinearLayout view = column();
+        view.setPadding(dp(18), dp(16), dp(18), dp(16));
+        GradientDrawable gradient = new GradientDrawable(GradientDrawable.Orientation.TR_BL,
+            new int[] {0xff457e69, 0xff174d40, 0xff123c33});
+        gradient.setCornerRadius(dp(24));
+        gradient.setStroke(dp(1), 0xff466d5f);
+        view.setBackground(gradient);
+        return view;
+    }
+
+    private Button heroButton(int text, boolean prominent) {
+        Button button = button(text, false);
+        button.setTextColor(prominent ? 0xff174b3e : HERO_TEXT);
+        button.setBackground(new RippleDrawable(ColorStateList.valueOf(0x337db199),
+            shape(prominent ? 0xffe2f1e4 : 0xff356252, prominent ? 0xffe2f1e4 : 0xff698d7d, 16), null));
+        return button;
     }
 
     private LinearLayout statusCard() {
         LinearLayout page = column();
-        LinearLayout destination = card(R.string.receiver);
-        connectedReceiver = label(0, 14, INK, false);
-        add(destination, connectedReceiver, 7);
-        switchMacButton = button(R.string.scan_switch_mac, false);
+        LinearLayout destination = hero();
+        LinearLayout identity = row();
+        LinearLayout text = column();
+        receiverKind = label(0, 13, HERO_HINT, true);
+        receiverName = label(0, 22, HERO_TEXT, true);
+        lastReceipt = label(R.string.first_receipt, 13, HERO_HINT, false);
+        add(text, receiverKind, 0);
+        add(text, receiverName, 5);
+        add(text, lastReceipt, 4);
+        identity.addView(text, new LinearLayout.LayoutParams(0, -2, 1));
+        receiverArt = new ImageView(this);
+        receiverArt.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        identity.addView(receiverArt, new LinearLayout.LayoutParams(dp(96), dp(66)));
+        add(destination, identity, 0);
+        switchMacButton = heroButton(R.string.scan_switch_mac, false);
         switchMacButton.setOnClickListener(view -> scanPairingCode());
-        add(destination, switchMacButton, 10);
-        connectionSettings = button(R.string.connection_settings, false);
-        connectionSettings.setOnClickListener(view -> {
-            editingConnection = !editingConnection;
-            refreshSyncControls();
-            if (editingConnection) {
-                pairingPanel.post(() -> pairingPanel.requestRectangleOnScreen(
-                    new Rect(0, 0, pairingPanel.getWidth(), dp(128)), false));
-            }
-        });
-        add(destination, connectionSettings, 10);
+        LinearLayout switchLine = row();
+        switchLine.addView(switchMacButton);
+        add(destination, switchLine, 8);
+        View separator = new View(this);
+        separator.setBackgroundColor(0x445e9d84);
+        LinearLayout.LayoutParams rule = new LinearLayout.LayoutParams(-1, dp(1));
+        rule.topMargin = dp(12);
+        destination.addView(separator, rule);
+        LinearLayout syncRow = row();
+        switchDot = label(0, 15, HERO_TEXT, true);
+        switchDot.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        switchDot.setText("●  ");
+        syncRow.addView(switchDot);
+        syncMode = label(0, 15, HERO_TEXT, true);
+        syncRow.addView(syncMode, new LinearLayout.LayoutParams(0,-2,1));
+        syncControlButton = heroButton(R.string.pause_short, false);
+        syncControlButton.setOnClickListener(view -> toggleSyncPause());
+        syncRow.addView(syncControlButton);
+        add(destination, syncRow, 8);
         add(page, destination, 0);
+
+        connectionIssue = label(0, 14, error, false);
+        connectionIssue.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        connectionIssue.setVisibility(View.GONE);
+        add(page, connectionIssue, 8);
         chat = new DeviceChat(this);
         add(page, chat.entry, 12);
+        LinearLayout heading = row();
+        TextView recentTitle = label(R.string.recent_title, 20, ink, true);
+        recentTitle.setAccessibilityHeading(true);
+        heading.addView(recentTitle, new LinearLayout.LayoutParams(0,-2,1));
+        receiptCount = label(0, 13, muted, false);
+        heading.addView(receiptCount);
+        clearRecentButton = button(R.string.clear_recent, false);
+        clearRecentButton.setOnClickListener(view -> confirmClearRecent());
+        clearRecentButton.setVisibility(View.GONE);
+        heading.addView(clearRecentButton);
+        add(page, heading, 18);
+        recentRows = column();
+        add(page, recentRows, 8);
 
-        LinearLayout card = card(R.string.automatic);
-        syncMode = label(0, 14, INK, true);
-        add(card, syncMode, 9);
-        syncStatus = label(R.string.status_setup, 13, MUTED, false);
+        receiverSettings = card(R.string.automatic);
+        LinearLayout card = receiverSettings;
+        settingsDetails = label(0, 14, muted, false);
+        add(card, settingsDetails, 8);
+        syncStatus = label(0, 13, muted, false);
         syncStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         add(card, syncStatus, 5);
-        permissionStatus = label(R.string.permission_missing, 13, MUTED, false);
+        permissionStatus = label(R.string.permission_missing, 13, muted, false);
         add(card, permissionStatus, 8);
         requestPermissionButton = button(R.string.permission, false);
         requestPermissionButton.setOnClickListener(view -> requestPermissions(PhotoAccess.permissions(), REQUEST_PHOTOS));
@@ -400,19 +577,12 @@ public final class MainActivity extends Activity {
         openSettingsButton.setOnClickListener(view -> startActivity(new Intent(
             Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", getPackageName(), null))));
         add(card, actionRow(requestPermissionButton, openSettingsButton), 8);
-
-        syncControlButton = button(R.string.stop_sync, false);
-        syncControlButton.setOnClickListener(view -> toggleSyncPause());
-        add(card, syncControlButton, 10);
         liveSyncButton = button(R.string.live_start, false);
         liveSyncButton.setOnClickListener(view -> toggleLiveSync());
         add(card, liveSyncButton, 8);
-        add(page, card, 12);
+        add(card, label(R.string.background_hint, 12, muted, false), 12);
 
-        chooseMediaButton = button(R.string.pick_media, true);
-        chooseMediaButton.setOnClickListener(view -> openMediaPicker());
-        add(page, chooseMediaButton, 12);
-        manualStatus = label(0, 13, MUTED, false);
+        manualStatus = label(0, 13, muted, false);
         manualStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         manualStatus.setVisibility(View.GONE);
         add(page, manualStatus, 8);
@@ -428,14 +598,15 @@ public final class MainActivity extends Activity {
             }
         });
         add(page, cancelSendButton, 8);
-        add(page, label(R.string.background_hint, 12, MUTED, false), 14);
+
         return page;
     }
 
     private record Input(String host, String code) {}
 
     private Input readInput() {
-        String host = SyncSettings.localHost(hostInput.getText().toString());
+        String address = java.text.Normalizer.normalize(hostInput.getText(), java.text.Normalizer.Form.NFKC);
+        String host = SyncSettings.localHost(address.replace('。', '.'));
         if (host.isEmpty()) {
             hostInput.setError(getString(R.string.invalid_host));
             hostInput.requestFocus();
@@ -469,11 +640,11 @@ public final class MainActivity extends Activity {
         if (result != RESULT_OK && !data.getBooleanExtra(Intents.Scan.MISSING_CAMERA_PERMISSION, false)) {
             return;
         }
-        editingConnection = true;
         refreshSyncControls();
-        pairingPanel.post(() -> pairingPanel.requestRectangleOnScreen(
-            new Rect(0, 0, pairingPanel.getWidth(), dp(200)), false));
         if (result != RESULT_OK) {
+            editingConnection = SyncSettings.read(this).isVerified();
+            manualFormOpen = true;
+            refreshSyncControls();
             showTestResult(R.string.scan_permission, true);
             return;
         }
@@ -494,14 +665,14 @@ public final class MainActivity extends Activity {
         showTestResult(R.string.status_testing, false);
         connectionExecutor.execute(() -> {
             String verifiedHost = null;
-            int response = 0;
+            ReceiverConnection.Health health = new ReceiverConnection.Health(0, MacProfile.UNKNOWN);
             for (String host : hosts) {
                 if (Thread.currentThread().isInterrupted()) {
                     return;
                 }
                 try (ReceiverConnection receiver = new ReceiverConnection(getApplicationContext(), host, code)) {
-                    response = receiver.test();
-                    if (response == 200) {
+                    health = receiver.test();
+                    if (health.status() == 200) {
                         verifiedHost = host;
                         break;
                     }
@@ -510,7 +681,8 @@ public final class MainActivity extends Activity {
                 }
             }
             String destination = verifiedHost;
-            int result = response;
+            ReceiverConnection.Health verified = health;
+            int result = verified.status();
             long verifiedAt = System.currentTimeMillis();
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed()) {
@@ -518,7 +690,7 @@ public final class MainActivity extends Activity {
                 }
                 verifying = false;
                 switch (result) {
-                    case 200 -> saveVerified(new Input(destination, code), verifiedAt);
+                    case 200 -> saveVerified(new Input(destination, code), verifiedAt, verified.mac());
                     case 401, 403 -> showTestResult(R.string.status_bad_code, true);
                     case 0 -> showTestResult(R.string.status_network, true);
                     default -> showTestResult(R.string.status_rejected, true, result);
@@ -528,8 +700,8 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void saveVerified(Input input, long verifiedAt) {
-        if (!SyncSettings.saveVerified(this, input.host(), input.code(), verifiedAt)) {
+    private void saveVerified(Input input, long verifiedAt, MacProfile mac) {
+        if (!SyncSettings.saveVerified(this, input.host(), input.code(), verifiedAt, mac)) {
             showTestResult(R.string.save_failed, true);
             return;
         }
@@ -550,12 +722,15 @@ public final class MainActivity extends Activity {
             }
         });
 
+        healthError = "";
         showReceiverAddress(input.host());
         codeInput.setText(input.code());
         getSystemService(InputMethodManager.class).hideSoftInputFromWindow(hostInput.getWindowToken(), 0);
         hostInput.clearFocus();
         codeInput.clearFocus();
         editingConnection = false;
+        manualFormOpen = false;
+        connectionIssue.setVisibility(View.GONE);
         testStatus.setVisibility(View.GONE);
         SyncScheduler.configure(this, pairing);
         refreshPermissions();
@@ -641,9 +816,16 @@ public final class MainActivity extends Activity {
     private void refreshSyncControls() {
         SyncSettings.Pairing pairing = SyncSettings.read(this);
         chat.bind(pairing);
+        updateBackNavigation();
         boolean connected = pairing.isVerified();
         boolean configured = pairing.isConfigured();
-        syncPanel.setVisibility(connected ? View.VISIBLE : View.GONE);
+        syncPanel.setVisibility(connected && !editingConnection ? View.VISIBLE : View.GONE);
+        connectionSettings.setVisibility(connected ? View.VISIBLE : View.GONE);
+        connectionSettings.setText(editingConnection ? R.string.close_options : R.string.connection_options);
+        pairingIntro.setVisibility(connected ? View.GONE : View.VISIBLE);
+        manualForm.setVisibility(manualFormOpen || connected && editingConnection ? View.VISIBLE : View.GONE);
+        receiverSettings.setVisibility(connected && editingConnection ? View.VISIBLE : View.GONE);
+        dock.setVisibility(connected && !editingConnection && !chat.isOpen() ? View.VISIBLE : View.GONE);
         pairingPanel.setVisibility(connected && !editingConnection ? View.GONE : View.VISIBLE);
         boolean sending = manual != null;
         scanButton.setEnabled(!verifying && !sending);
@@ -658,20 +840,156 @@ public final class MainActivity extends Activity {
         retryButton.setEnabled(connected && !verifying);
         cancelSendButton.setVisibility(sending ? View.VISIBLE : View.GONE);
         syncControlButton.setEnabled(!verifying);
-        syncControlButton.setText(pairing.paused() ? R.string.resume_sync : R.string.stop_sync);
+        syncControlButton.setText(pairing.paused() ? R.string.resume_short : R.string.pause_short);
         PhotoAccess access = PhotoAccess.current(this);
         boolean live = SyncSettings.liveEnabled(this);
         liveSyncButton.setText(live ? R.string.live_stop : R.string.live_start);
         liveSyncButton.setEnabled(!verifying && (live || !pairing.paused() && access == PhotoAccess.FULL));
         if (!connected) {
+            receiptOwner = "";
             return;
         }
 
         String timestamp = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
             .format(new Date(pairing.connectedAt()));
-        connectedReceiver.setText(getString(R.string.connection_summary, pairing.host(), SyncSettings.PORT, timestamp));
-        syncMode.setText(pairing.paused() ? R.string.automatic_paused
-            : access == PhotoAccess.FULL ? R.string.automatic_running : R.string.automatic_needs_permission);
+        receiverName.setText(pairing.mac().displayName());
+        receiverArt.setImageResource(pairing.mac().family().drawable);
+        receiverArt.setContentDescription(pairing.mac().family().label);
+        receiverKind.setText(getString(R.string.linked_receiver, pairing.mac().family().label));
+        settingsDetails.setText(getString(R.string.connection_summary, pairing.host(), SyncSettings.PORT, timestamp));
+        syncMode.setText(pairing.paused() ? R.string.switch_off : R.string.switch_on);
+        switchDot.setTextColor(pairing.paused() ? 0xffffa297 : 0xff8aefb2);
+        if (!receiptOwner.equals(pairing.receiverId())) {
+            receiptOwner = pairing.receiverId();
+            recentRows.removeAllViews();
+            receiptCount.setText("");
+            recentIds = Collections.emptyList();
+            clearRecentButton.setVisibility(View.GONE);
+            lastReceipt.setText(R.string.first_receipt);
+            refreshRecent(pairing);
+        }
+        showConnectionIssue(pairing);
+    }
+
+    private void showConnectionIssue(SyncSettings.Pairing pairing) {
+        SharedPreferences prefs = SyncSettings.preferences(this);
+        String issue = healthError;
+        if (!pairing.paused() && PhotoAccess.current(this) != PhotoAccess.FULL) {
+            issue = getString(R.string.automatic_needs_permission) + " · 打开设置";
+        } else if (prefs.getBoolean(SyncSettings.NEEDS_ATTENTION, false)) {
+            issue = prefs.getString(SyncSettings.STATUS, "");
+        }
+        if (testStatus.getVisibility() == View.VISIBLE) {
+            issue = testStatus.getText().toString();
+        }
+        connectionIssue.setVisibility(issue.isEmpty() ? View.GONE : View.VISIBLE);
+        connectionIssue.setText(issue);
+        connectionIssue.setOnClickListener(v -> connectionSettings.performClick());
+    }
+
+    private void refreshRecent(SyncSettings.Pairing pairing) {
+        long ticket = ++receiptRequest;
+        if (!pairing.isVerified()) { return; }
+        previewExecutor.execute(() -> {
+            try (DeliveryReceipts receipts = new DeliveryReceipts(this)) {
+                List<DeliveryReceipts.Delivery> rows = receipts.recent(pairing.receiverId());
+                long lastDelivered = receipts.lastDelivery(pairing.receiverId());
+                runOnUiThread(() -> {
+                    if (!isDestroyed() && ticket == receiptRequest && pairing.receiverId().equals(receiptOwner)) {
+                        renderRecent(rows, lastDelivered);
+                    }
+                });
+            }
+        });
+    }
+
+    private void confirmClearRecent() {
+        SyncSettings.Pairing pairing = SyncSettings.read(this);
+        if (!pairing.isVerified() || !pairing.receiverId().equals(receiptOwner) || recentIds.isEmpty()) { return; }
+        List<String> items = new ArrayList<>(recentIds);
+        new AlertDialog.Builder(this)
+            .setTitle(R.string.clear_recent_title)
+            .setMessage(getString(R.string.clear_recent_message, pairing.mac().displayName()))
+            .setNegativeButton(R.string.cancel_clear_recent, null)
+            .setPositiveButton(R.string.confirm_clear_recent, (dialog, which) -> {
+                if (!SyncSettings.isCurrent(this, pairing)) { return; }
+                previewExecutor.execute(() -> {
+                    try (DeliveryReceipts receipts = new DeliveryReceipts(this)) {
+                        receipts.clearRecent(pairing.receiverId(), items);
+                    } catch (android.database.SQLException failure) {
+                        runOnUiThread(() -> {
+                            if (!isDestroyed() && SyncSettings.isCurrent(this, pairing)) {
+                                android.widget.Toast.makeText(this, R.string.clear_recent_failed, android.widget.Toast.LENGTH_LONG).show();
+                            }
+                        });
+                    }
+                    runOnUiThread(() -> {
+                        if (!isDestroyed() && SyncSettings.isCurrent(this, pairing)) { refreshRecent(pairing); }
+                    });
+                });
+            }).show();
+    }
+
+    private void renderRecent(List<DeliveryReceipts.Delivery> rows, long lastDelivered) {
+        recentIds = new ArrayList<>(rows.size());
+        for (DeliveryReceipts.Delivery item : rows) { recentIds.add(item.id()); }
+        clearRecentButton.setVisibility(rows.isEmpty() ? View.GONE : View.VISIBLE);
+        recentRows.removeAllViews();
+        receiptCount.setText(rows.isEmpty() ? "" : rows.size() + " 项");
+        DateFormat dateTime = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT);
+        lastReceipt.setText(lastDelivered == 0 ? getString(R.string.first_receipt)
+            : getString(R.string.last_receipt, dateTime.format(new Date(lastDelivered))));
+        if (rows.isEmpty()) {
+            add(recentRows, label(R.string.empty_deliveries, 14, muted, false), 4);
+            return;
+        }
+        for (DeliveryReceipts.Delivery item : rows) {
+            LinearLayout line = row();
+            line.setPadding(0, dp(9), 0, dp(9));
+            FrameLayout preview = new FrameLayout(this);
+            preview.setBackground(shape(tint, border, 8));
+            preview.setClipToOutline(true);
+            boolean video = item.type().startsWith("video/");
+            if (item.preview() != null) {
+                ImageView photo = new ImageView(this);
+                photo.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                photo.setImageBitmap(android.graphics.BitmapFactory.decodeByteArray(item.preview(), 0, item.preview().length));
+                preview.addView(photo, -1, -1);
+            } else {
+                TextView kind = label(0, 12, muted, true);
+                kind.setText(video ? "视频" : "图片");
+                kind.setGravity(Gravity.CENTER);
+                preview.addView(kind,-1,-1);
+            }
+            line.addView(preview, new LinearLayout.LayoutParams(dp(48),dp(48)));
+            LinearLayout labels = column();
+            labels.setPaddingRelative(dp(10),0,dp(8),0);
+            TextView filename = label(0, 15, ink, true);
+            filename.setText(item.name());
+            filename.setSingleLine(true);
+            filename.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            add(labels, filename, 0);
+            TextView detail = label(0, 12, muted, false);
+            detail.setText(getString(item.manual() ? R.string.manual_mode : R.string.automatic) + " · "
+                + android.text.format.Formatter.formatShortFileSize(this, item.bytes()));
+            add(labels, detail, 3);
+            line.addView(labels, new LinearLayout.LayoutParams(0,-2,1));
+            LinearLayout stamp = column();
+            stamp.setGravity(Gravity.END);
+            TextView time = label(0, 12, muted, false);
+            java.util.Date delivered = new Date(item.time());
+            time.setText(android.text.format.DateUtils.isToday(item.time())
+                ? DateFormat.getTimeInstance(DateFormat.SHORT).format(delivered)
+                : DateFormat.getDateInstance(DateFormat.SHORT).format(delivered));
+            time.setContentDescription(dateTime.format(delivered));
+            stamp.addView(time);
+            stamp.addView(label(R.string.delivered, 12, accent, true));
+            line.addView(stamp);
+            add(recentRows, line, 0);
+            View rule = new View(this);
+            rule.setBackgroundColor(border);
+            recentRows.addView(rule,-1,dp(1));
+        }
     }
 
     @SuppressWarnings("deprecation")
@@ -751,17 +1069,39 @@ public final class MainActivity extends Activity {
         List<Uri> selection = new ArrayList<>(selectedMedia);
         LinearLayout previewContent = column();
         previewContent.setPadding(dp(20), dp(8), dp(20), dp(8));
-        TextView message = label(0, 14, INK, false);
-        message.setText(getString(R.string.manual_confirm_receiver, pairing.host(), SyncSettings.PORT, selection.size()));
+        TextView message = label(0, 14, ink, false);
+        message.setText(getString(R.string.manual_confirm_receiver, pairing.mac().displayName(), selection.size()));
         add(previewContent, message, 0);
         HorizontalScrollView thumbnails = new HorizontalScrollView(this);
         LinearLayout previews = row();
         thumbnails.addView(previews);
         add(previewContent, thumbnails, 10);
         CancellationSignal cancellation = new CancellationSignal();
+        previewExecutor.execute(() -> {
+            int photos = 0, videos = 0;
+            try {
+                for (Uri uri : selection) {
+                    if (cancellation.isCanceled()) { return; }
+                    String mime = getContentResolver().getType(uri);
+                    if (mime != null && mime.startsWith("image/")) { photos++; }
+                    else if (mime != null && mime.startsWith("video/")) { videos++; }
+                }
+            } catch (RuntimeException unavailable) {
+                return; // Keep the total if a provider does not expose the type.
+            }
+            if (photos + videos == selection.size()) {
+                String summary = (photos > 0 ? photos + " 张照片" : "")
+                    + (photos > 0 && videos > 0 ? " · " : "") + (videos > 0 ? videos + " 个视频" : "");
+                runOnUiThread(() -> {
+                    if (!cancellation.isCanceled()) {
+                        message.setText("发送至 " + pairing.mac().displayName() + "\n" + summary);
+                    }
+                });
+            }
+        });
         for (Uri uri : selection.subList(0, Math.min(selection.size(), 6))) {
             FrameLayout preview = new FrameLayout(this);
-            preview.setBackground(shape(FIELD, BORDER, 8));
+            preview.setBackground(shape(panel, border, 8));
             preview.setClipToOutline(true);
             ImageView thumbnail = new ImageView(this);
             thumbnail.setScaleType(ImageView.ScaleType.CENTER_CROP);
@@ -770,7 +1110,7 @@ public final class MainActivity extends Activity {
             TextView videoBadge = label(R.string.manual_video, 10, Color.WHITE, true);
             videoBadge.setVisibility(View.GONE);
             videoBadge.setPadding(dp(5), dp(1), dp(5), dp(1));
-            videoBadge.setBackground(shape(INK, INK, 4));
+            videoBadge.setBackground(shape(ink, ink, 4));
             FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.END);
             badgeParams.setMarginEnd(dp(3));
@@ -879,8 +1219,12 @@ public final class MainActivity extends Activity {
 
     private void showTestResult(int message, boolean error, Object... arguments) {
         testStatus.setVisibility(View.VISIBLE);
-        testStatus.setTextColor(error ? ERROR : MUTED);
+        testStatus.setTextColor(error ? this.error : muted);
         testStatus.setText(getString(message, arguments));
+        if (syncPanel.getVisibility() == View.VISIBLE) {
+            connectionIssue.setVisibility(View.VISIBLE);
+            connectionIssue.setText(testStatus.getText());
+        }
     }
 
     private void showSavedStatus() {
@@ -896,8 +1240,8 @@ public final class MainActivity extends Activity {
     private LinearLayout card(int headingText) {
         LinearLayout card = column();
         card.setPadding(dp(16), dp(16), dp(16), dp(16));
-        card.setBackground(shape(Color.WHITE, BORDER, 16));
-        TextView heading = label(headingText, 18, INK, true);
+        card.setBackground(shape(panel, border, 18));
+        TextView heading = label(headingText, 18, ink, true);
         heading.setAccessibilityHeading(true);
         add(card, heading, 0);
         return card;
@@ -922,29 +1266,40 @@ public final class MainActivity extends Activity {
         view.setSingleLine(true);
         view.setInputType(inputType);
         view.setTextSize(15);
-        view.setTextColor(INK);
-        view.setHintTextColor(MUTED);
+        view.setTextColor(ink);
+        view.setHintTextColor(muted);
         view.setHint(hint);
         view.setPadding(dp(12), dp(8), dp(12), dp(8));
         view.setMinHeight(dp(48));
-        view.setBackground(shape(FIELD, BORDER, 9));
+        view.setBackground(shape(panel, border, 9));
         return view;
     }
 
     Button button(int text, boolean filled) {
         Button view = new Button(this);
+        view.setMinWidth(dp(48));
+        view.setMinimumWidth(dp(48));
+        view.setStateListAnimator(null);
         view.setText(text);
         view.setAllCaps(false);
         view.setTextSize(14);
         view.setTextColor(new ColorStateList(
             new int[][] {{-android.R.attr.state_enabled}, {}},
-            new int[] {filled ? 0xffd8e5ff : MUTED, filled ? Color.WHITE : ACCENT}));
+            new int[] {filled ? 0xffc3d1c8 : muted, filled ? Color.WHITE : accent}));
         view.setMinHeight(dp(48));
         view.setPadding(dp(12), dp(6), dp(12), dp(6));
-        view.setBackground(new RippleDrawable(ColorStateList.valueOf(0x242457c6),
-            shape(filled ? ACCENT : FIELD, filled ? ACCENT : BORDER, 9),
-            shape(Color.WHITE, Color.WHITE, 9)));
+        view.setBackground(new RippleDrawable(ColorStateList.valueOf(0x244b7c60),
+            shape(filled ? primary : panel, filled ? primary : border, 16),
+            shape(Color.WHITE, Color.WHITE, 16)));
         return view;
+    }
+
+    GradientDrawable glassSurface(int radius) {
+        GradientDrawable surface = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+            new int[] {panel, (tint & 0x00ffffff) | 0xeb000000, (panel & 0x00ffffff) | 0xed000000});
+        surface.setCornerRadius(dp(radius));
+        surface.setStroke(dp(1), border);
+        return surface;
     }
 
     GradientDrawable shape(int fill, int stroke, int radius) {

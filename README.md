@@ -5,18 +5,22 @@
 ## 使用方式
 
 1. 打开 Mac 上的「即图」（SnapRelay），保持应用运行。关闭窗口后，仍可从菜单栏打开接收端。
-2. 让手机和 Mac 连到同一局域网。点 Mac 窗口右上角的「扫码配对」，再用手机端的「扫一扫配对」扫描二维码。要换电脑，点手机端的「扫码更换 Mac」并扫另一台 Mac 的码，验证成功后手机会切换到新 Mac。取消扫码或验证失败时，原配对会保留。也可选择「手动配对」查看地址和配对码并在手机上输入。iOS 需要授权访问本地网络。
+2. 让手机和 Mac 连到同一局域网。点 Mac 窗口右上角的「扫码配对」，再点手机首页的「扫码连接 Mac」扫描二维码。要换电脑，点手机端的「扫码更换 Mac」并扫另一台 Mac 的码，验证成功后手机会切换到新 Mac。取消扫码或验证失败时，原配对会保留。也可选择「手动配对」查看地址和配对码并在手机上输入。iOS 需要授权访问本地网络。
 3. 授予完整相册权限后，App 可自动发现起点之后截取并保存到相册的新截图。短暂断网、重开手机 App 或更新同一配对的地址会沿用起点。断开后重新配对或改用新配对码时，验证成功会建立新的起点。
 4. 从手动发送入口用系统相册多选照片和视频，确认目标 Mac 和数量后发送。MP4、MOV 和 M4V 视频可以手动发送，单文件上限 512 MiB。手动发送使用系统为本次选择授予的访问权限，自动同步暂停时也可使用。
 5. 暂停自动同步可中断正在进行的自动传输。继续后，App 会检查配对起点之后尚未发送的截图。Mac 已收的图片会保留，重试时会按传输 ID 去重。
 6. Mac 画廊按 iOS、Android、鸿蒙分类，支持预览图片和播放视频。用两侧按钮或 `←` / `→` 浏览同一筛选下的文件，`⌘C` 可复制当前图片。在访达删除文件后，点击「刷新」或按 `⌘R` 可清除旧预览。文件默认保存到 `~/Pictures/截图同步`。点工具栏的「清除全部图片」可查看当前传图文件夹的路径和图片总数，确认后会把该文件夹顶层的图片移到 Mac 废纸篓，并刷新图库。
 7. 在 Mac 的「管理手机」中可查看每部手机的名称、型号、系统版本，以及它在当前图库中的文件数。新登记的 Android 手机默认显示为 `Android 1`、`Android 2`，鸿蒙手机为 `Harmony 1`、`Harmony 2`。用铅笔可以改名，手机上报的型号和系统设备名显示在详情中。删除手机后，原有图片和视频可在「未识别设备」中查看。该手机再次成功发送新文件后会重新登记。
 
+手机首页的设备卡显示当前接收端的电脑名称、机型配图和自动同步开关。图片或视频经 Mac 确认接收后，会出现在「最近传输」。点标题旁的「清除记录」并确认，即可清空这台 Mac 对应的本机列表。手机原件、Mac 接收的文件和自动同步的去重记录都会保留。
+
+iPhone 首次打开即图时，可以从首页的「开启照片访问」授权自动识别新截图。手动发送照片、视频或对话附件时，iPhone 会按已上传的字节显示进度，文件上传后会等待 Mac 确认送达。
+
 ![Mac 手机管理界面，展示两台 Android 手机的编号、型号和系统版本](docs/images/device-management.png)
 
 ## 和配对设备对话
 
-在手机的截图首页，点「与 Mac 对话」进入全屏对话页。页面会显示已配对 Mac 的名称，底部可以输入文字或选文件。点返回即可回到截图首页，对话入口会显示最近一条消息和未读数量。
+在手机的截图首页，点设备卡下方的「设备对话」进入全屏对话页。页面会显示已配对 Mac 的名称，底部可以输入文字或选文件。点返回即可回到截图首页，对话入口会显示最近一条消息和未读数量。
 
 在 Mac 上选择具体手机的子标签，展开图库上方的对话栏，例如「与 iPhone 1 对话」。每部手机有自己的记录，自定义设备名称后仍使用同一个对话。
 
@@ -49,7 +53,7 @@
 
 ## 自动同步的实际表现
 
-- **iOS 27 及以上** 支持在使用其他 App 时照常按键截屏。先给即图完整照片和本地网络权限，完成 Mac 配对，并开启自动同步。在即图首页点「设置后台截屏同步」→「新建快捷指令」，添加「同步新截图到 Mac」操作，在编辑器的「自动化」中选「截屏」→ 存储到「照片」，并在本机启用。之后每当截屏存入照片，系统都可以在后台调用即图发送到当前配对的 Mac。换 Mac 后沿用同一条快捷指令。实际到达时间取决于系统触发、相册写入和局域网状况。[Apple 的截屏自动化说明](https://support.apple.com/zh-cn/149045)
+- **iOS 27 及以上** 支持在使用其他 App 时照常按键截屏。先给即图完整照片和本地网络权限，完成 Mac 配对，并开启自动同步。在即图首页右上角打开设置，点「后台截屏同步」→「新建快捷指令」，添加「同步新截图到 Mac」操作，在编辑器的「自动化」中选「截屏」→ 存储到「照片」，并在本机启用。之后每当截屏存入照片，系统都可以在后台调用即图发送到当前配对的 Mac。换 Mac 后沿用同一条快捷指令。实际到达时间取决于系统触发、相册写入和局域网状况。[Apple 的截屏自动化说明](https://support.apple.com/zh-cn/149045)
 - **iOS 17–26，或未启用截屏自动化时**，即图在前台收到截屏和相册变化事件时会检查新截图。切到后台后，已开始的传输可申请有限时间收尾，新的截图由系统择机补传，返回即图也会立即检查。[系统截屏通知](https://developer.apple.com/documentation/uikit/uiapplication/userdidtakescreenshotnotification) · [延长后台执行时间](https://developer.apple.com/documentation/uikit/extending-your-app-s-background-execution-time)
 - **Android** 配对并授予完整相册权限后，点「开启后台实时同步」。前台服务会显示同步通知，切到其他 App 后也会监听媒体库。可在即图或通知中关闭，关闭后由 WorkManager 继续调度补传。截图通过拍摄时间及常见截图目录和文件名识别。[前台服务](https://developer.android.com/develop/background-work/services/foreground-services) · [WorkManager 调度](https://developer.android.com/develop/background-work/background-tasks/persistent/getting-started/define-work)
 - **HarmonyOS NEXT** 按系统公布的路径读取截图相册，相册变动或回到即图时立即检查，优先发送最新截图。已准备发送的截图可申请短时后台运行，应用挂起后由 Work Scheduler 择机补传。受限图库权限需要华为签名授权。[相册路径](https://developer.huawei.com/consumer/en/doc/harmonyos-references/arkts-apis-photoaccesshelper-e/) · [短时任务](https://developer.huawei.com/consumer/en/doc/harmonyos-guides-V13/transient-task-V13/) · [后台延迟任务](https://developer.huawei.com/consumer/en/doc/HarmonyOS-Guides/work-scheduler/) · [受限权限](https://developer.huawei.com/consumer/en/doc/harmonyos-guides/restricted-permissions/)
@@ -66,6 +70,8 @@
 ## 局域网接口
 
 Mac 默认使用 TCP 端口 `43871`。手机可用 `GET /v1/health` 检查连接并附加 `Authorization: Bearer <配对码>` 校验配对码。
+
+认证成功后，接收端会在 `status` 之外返回电脑名称 `macName` 和硬件系列 `macFamily`。移动端按硬件系列选择内置插图，电脑改名后仍匹配同一机型。旧版响应和未知系列使用通用 Mac 插图。
 
 配对二维码以 UTF-8 JSON 编码。字段 `type` 为 `snaprelay-pair`，`version` 为数字 `1`，`addresses` 包含 1–16 个形如 `http://192.168.1.2:43871` 的局域网 IPv4 地址，`token` 为 Mac 当前的 24 位十六进制配对码。手机用码中的配对码验证候选地址，收到 HTTP 200 和 `{"status":"ok"}` 后保存一个可用地址。在 Mac 的「手动配对」中重新生成配对码后，旧二维码随之失效。
 

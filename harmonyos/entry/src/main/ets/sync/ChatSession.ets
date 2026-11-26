@@ -7,6 +7,7 @@ import { rcp } from '@kit.RemoteCommunicationKit';
 import { ChatAttachment, ChatMessage, chatKey, MAX_CHAT_FILE, MAX_CHAT_TEXT } from './ChatTypes';
 import { ChatDownload, chatDownloads, chatRoomKey, deleteChatDownload, trackChatDownload } from './ChatDownloads';
 import { loadPairing, Pairing } from './Pairing';
+import { macDisplayName } from './MacProfile';
 import { Receiver } from './Receiver';
 
 @Observed
@@ -44,6 +45,7 @@ export class ChatSession {
     this.room = room;
     const target = this.pairing();
     if (target) {
+      this.mac = target.mac ? macDisplayName(target.mac) : 'Mac';
       try {
         const prefs = preferences.getPreferencesSync(context, { name: 'device-chat' });
         this.lastRead = Number(prefs.getSync('read-' + target.destination, 0));

@@ -35,7 +35,7 @@ final class ManualSend implements AutoCloseable {
                 receiver = connection;
             }
             MediaTransfer.checkCancelled(() -> cancelled(context, pairing));
-            response = connection.test();
+            response = connection.test().status();
             if (response != 200) {
                 return new Result(pending, sent, duplicates, responseError(response), response);
             }

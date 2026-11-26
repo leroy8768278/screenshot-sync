@@ -2,9 +2,7 @@ import { KeyboardAvoidMode } from '@kit.ArkUI';
 import { ChatSession } from '../sync/ChatSession';
 import { ChatAttachment, ChatMessage, chatSize } from '../sync/ChatTypes';
 
-const BLUE: string = '#2359D7';
-const INK: string = '#162444';
-const MUTED: string = '#475975';
+const PINE: string = '#145848';
 const CHAT_INPUT_ID: string = 'chat-message-input';
 const DISMISS_KEYBOARD: string = 'dismiss-chat-keyboard';
 
@@ -16,18 +14,20 @@ export struct ChatEntry {
   build() {
     Button({ type: ButtonType.Normal }) {
       Row({ space: 10 }) {
+        Image($r('app.media.action_chat')).width(24).height(24).fillColor($r('app.color.accent_text'))
+          .accessibilityLevel('no')
         Column({ space: 4 }) {
-          Text('与 ' + this.session.mac + ' 对话').fontSize(17).fontWeight(FontWeight.Medium)
-            .fontColor(INK).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-          Text(this.session.snippet()).fontSize(13).fontColor(MUTED).maxLines(1)
+          Text('设备对话').fontSize(17).fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.ink')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(this.session.snippet()).fontSize(13).fontColor($r('app.color.secondary_text')).maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
         }.layoutWeight(1).alignItems(HorizontalAlign.Start)
         if (this.session.unread() > 0) {
-          Text(this.session.unread() + ' 条未读').fontSize(13).fontColor(BLUE)
+          Text(this.session.unread() + ' 条未读').fontSize(13).fontColor($r('app.color.accent_text'))
         }
-        Text('›').fontSize(24).fontColor(MUTED).accessibilityLevel('no')
+        Text('›').fontSize(24).fontColor($r('app.color.secondary_text')).accessibilityLevel('no')
       }.width('100%').padding(16)
-    }.width('100%').height('auto').backgroundColor(Color.White).borderRadius(18).onClick(this.open)
+    }.width('100%').height('auto').backgroundColor($r('app.color.surface')).borderRadius(18).onClick(this.open)
   }
 }
 
@@ -55,7 +55,7 @@ export struct ChatPage {
         Scroll(this.history) {
           Column({ space: 14 }) {
             if (this.session.messages.length === 0) {
-              Text('暂无消息').fontSize(14).fontColor(MUTED).padding(20)
+              Text('暂无消息').fontSize(14).fontColor($r('app.color.secondary_text')).padding(20)
             }
             ForEach(this.session.messages, (m: ChatMessage) => {
               this.message(m)
@@ -69,7 +69,7 @@ export struct ChatPage {
 
         this.composer()
       }
-      .height('100%').width('100%').backgroundColor('#F3F6FC')
+      .height('100%').width('100%').backgroundColor($r('app.color.window_background'))
       .parallelGesture(TapGesture().tag(DISMISS_KEYBOARD).onAction(() => { this.editor.stopEditing(); }))
       .onTouchTestDone((_event: BaseGestureEvent, recognizers: GestureRecognizer[]) => {
         if (recognizers.some((r: GestureRecognizer): boolean => r.getEventTargetInfo().getId() === CHAT_INPUT_ID)) {
@@ -81,7 +81,7 @@ export struct ChatPage {
         onDisappear: () => { this.session.showingClear = false; }
       })
     }
-    .title('与 ' + this.session.mac + ' 对话')
+    .title(this.session.mac)
     .menus(this.actions())
     .onShown(() => { this.session.setPageVisible(true); })
     .onHidden(() => { this.session.setPageVisible(false); })
@@ -89,23 +89,25 @@ export struct ChatPage {
 
   @Builder
   private actions() {
-    Button('清除对话记录').fontSize(13).fontColor('#A32332').backgroundColor('#FFF1F1')
-      .enabled(!this.session.busy)
-      .onClick(() => { this.editor.stopEditing(); this.session.prepareClear(); })
+    Button('更多').fontSize(14).fontColor($r('app.color.ink')).backgroundColor($r('app.color.soft'))
+      .bindMenu([{ value: '清除对话记录', action: () => {
+        this.editor.stopEditing(); this.session.prepareClear();
+      }, enabled: !this.session.busy }])
   }
 
   @Builder
   private message(m: ChatMessage) {
     Column({ space: 4 }) {
       Text((m.sender === 'mac' ? this.session.mac : '我') + ' · ' + new Date(m.createdAt * 1000).toLocaleTimeString())
-        .fontSize(12).fontColor(MUTED)
+        .fontSize(12).fontColor($r('app.color.secondary_text'))
       if (m.kind === 'text') {
-        Text(m.text ?? '').copyOption(CopyOptions.LocalDevice).padding(10).fontColor(INK)
-          .backgroundColor(m.sender === 'phone' ? '#E4EDFF' : '#FFFFFF').borderRadius(10)
-        Button('复制').fontSize(12).height(30).backgroundColor(Color.Transparent).fontColor(BLUE)
-          .onClick(() => { this.session.copy(m.text ?? ''); })
+        Text(m.text ?? '').copyOption(CopyOptions.LocalDevice).padding(12).fontColor($r('app.color.ink'))
+          .constraintSize({ maxWidth: '88%' })
+          .backgroundColor(m.sender === 'phone' ? $r('app.color.bubble') : $r('app.color.surface')).borderRadius(15)
+          .bindMenu([{ value: '复制文字', action: () => { this.session.copy(m.text ?? ''); } }])
       } else {
-        Text((m.filename ?? '附件') + ' · ' + chatSize(m.bytes)).fontSize(14)
+        Text((m.filename ?? '附件') + ' · ' + chatSize(m.bytes)).fontSize(14).fontColor($r('app.color.ink'))
+          .backgroundColor($r('app.color.surface')).padding(12).borderRadius(12)
         if (m.sender === 'mac') {
           Button(this.session.received.includes(m.id) ? '再次保存' : '接收').enabled(!this.session.busy)
             .onClick(() => { this.session.fileAction(m, false); })
@@ -125,7 +127,7 @@ export struct ChatPage {
   private composer() {
     Column({ space: 8 }) {
       if (this.session.networkError || this.session.notice) {
-        Text(this.session.networkError || this.session.notice).fontSize(13).fontColor(MUTED)
+        Text(this.session.networkError || this.session.notice).fontSize(13).fontColor($r('app.color.secondary_text'))
       }
       if (this.session.files.length > 0) {
         Scroll() {
@@ -141,18 +143,20 @@ export struct ChatPage {
           }
         }.scrollable(ScrollDirection.Horizontal).width('100%')
       }
-      TextArea({ text: this.session.draft, placeholder: '输入或粘贴文字', controller: this.editor })
-        .id(CHAT_INPUT_ID).maxLines(3).constraintSize({ minHeight: 44, maxHeight: 96 })
-        .enabled(!this.session.busy).onChange((text: string) => { this.session.updateDraft(text); })
-      Row() {
-        Button('选文件').backgroundColor('#EAF0FF').fontColor(INK).enabled(!this.session.busy)
-          .onClick(() => { this.session.pick(); })
-        Blank().layoutWeight(1)
-        Button('发送').backgroundColor(BLUE)
+      Row({ space: 6 }) {
+        Button({ type: ButtonType.Circle }) {
+          Image($r('app.media.action_attach')).width(21).height(21).fillColor($r('app.color.accent_text'))
+        }.width(44).height(44).backgroundColor($r('app.color.soft')).enabled(!this.session.busy)
+          .accessibilityText('选文件').onClick(() => { this.session.pick(); })
+        TextArea({ text: this.session.draft, placeholder: '输入或粘贴文字', controller: this.editor })
+          .id(CHAT_INPUT_ID).maxLines(3).layoutWeight(1).constraintSize({ minHeight: 44, maxHeight: 96 })
+          .fontColor($r('app.color.ink')).backgroundColor(Color.Transparent).padding(7)
+          .enabled(!this.session.busy).onChange((text: string) => { this.session.updateDraft(text); })
+        Button('发送').height(44).backgroundColor(PINE).fontColor(Color.White)
           .enabled(!this.session.busy && (this.session.draft.trim().length > 0 || this.session.files.length > 0))
           .onClick(() => { this.followLatest = true; this.session.send(); })
       }.width('100%')
-    }.width('100%').padding(12).backgroundColor(Color.White)
+    }.width('100%').padding(12).backgroundBlurStyle(BlurStyle.Thin).backgroundColor($r('app.color.dock'))
   }
 
   @Builder
@@ -165,7 +169,7 @@ export struct ChatPage {
           .onChange((value: boolean) => { this.session.clearFiles = value; })
         Text(`同时删除保存到「文件」的下载文件（${this.session.downloads.length} 个）`).fontSize(14)
       }
-      Text('此处只列出即图已登记的文件。').fontSize(12).fontColor(MUTED)
+      Text('此处只列出即图已登记的文件。').fontSize(12).fontColor($r('app.color.secondary_text'))
       Row({ space: 12 }) {
         Button('取消').onClick(() => { this.session.showingClear = false; })
         Button('确认清除').backgroundColor('#A32332')

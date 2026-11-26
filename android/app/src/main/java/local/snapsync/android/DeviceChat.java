@@ -42,7 +42,6 @@ import java.util.concurrent.Executors;
 
 final class DeviceChat {
     private static final int PICK = 11, SAVE = 12;
-    private static final int INK = 0xff172641, MUTED = 0xff52617a;
     private final MainActivity app;
     final LinearLayout entry, page;
     private final LinearLayout history, attachments;
@@ -80,7 +79,7 @@ final class DeviceChat {
         downloads = new ChatDownloads(app);
         entry = app.column();
         entry.setPadding(app.dp(16), app.dp(10), app.dp(16), app.dp(12));
-        entry.setBackground(app.shape(0xffffffff, 0xffd8e0ed, 16));
+        entry.setBackground(app.shape(app.panel, app.border, 18));
         entry.setFocusable(true);
         entry.setOnClickListener(v -> openPage());
         TypedValue feedback = new TypedValue();
@@ -96,15 +95,15 @@ final class DeviceChat {
         LinearLayout entryRow = new LinearLayout(app);
         entryRow.setGravity(Gravity.CENTER_VERTICAL);
         entryRow.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
-        entryTitle = app.label(0, 17, INK, true);
+        entryTitle = app.label(0, 17, app.ink, true);
         entryTitle.setSingleLine(true);
         entryTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
         entryRow.addView(entryTitle, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView chevron = app.label(0, 22, MUTED, false);
+        TextView chevron = app.label(0, 22, app.muted, false);
         chevron.setText("›");
         entryRow.addView(chevron);
         app.add(entry, entryRow, 0);
-        snippet = app.label(0, 13, MUTED, false);
+        snippet = app.label(0, 13, app.muted, false);
         snippet.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         snippet.setSingleLine(true);
         snippet.setEllipsize(android.text.TextUtils.TruncateAt.END);
@@ -113,7 +112,7 @@ final class DeviceChat {
         page = app.column();
         page.setVisibility(View.GONE);
         page.setFocusableInTouchMode(true);
-        page.setBackgroundColor(0xfff8faff);
+        page.setBackgroundColor(app.paper);
         page.setPadding(app.dp(12), app.dp(6), app.dp(12), app.dp(8));
         LinearLayout header = new LinearLayout(app);
         header.setGravity(Gravity.CENTER_VERTICAL);
@@ -121,14 +120,21 @@ final class DeviceChat {
         back.setMinWidth(0);
         back.setOnClickListener(v -> returnHome());
         header.addView(back);
-        title = app.label(0, 18, INK, true);
+        title = app.label(0, 18, app.ink, true);
         title.setSingleLine(true);
         title.setEllipsize(android.text.TextUtils.TruncateAt.END);
         title.setAccessibilityHeading(true);
         title.setPaddingRelative(app.dp(10), 0, app.dp(8), 0);
         header.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
-        clearHistory = app.button(R.string.chat_clear, false);
-        clearHistory.setOnClickListener(v -> confirmClear());
+        clearHistory = app.button(R.string.chat_more, false);
+        clearHistory.setOnClickListener(v -> {
+            android.widget.PopupMenu menu = new android.widget.PopupMenu(app, clearHistory);
+            menu.getMenu().add(R.string.chat_clear).setOnMenuItemClickListener(item -> {
+                confirmClear();
+                return true;
+            });
+            menu.show();
+        });
         header.addView(clearHistory);
         app.add(page, header, 0);
 
@@ -139,7 +145,7 @@ final class DeviceChat {
         scroll.addView(history);
         page.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         LinearLayout composer = app.column();
-        composer.setBackground(app.shape(0xffffffff, 0xffd8e0ed, 12));
+        composer.setBackground(app.glassSurface(22));
         composer.setPadding(app.dp(8), app.dp(4), app.dp(8), app.dp(6));
         app.add(page, composer, 4);
         input = new EditText(app);
@@ -163,13 +169,16 @@ final class DeviceChat {
                 return false;
             }
         });
-        input.setHint("输入或粘贴文字…");
+        input.setHint("输入或粘贴文字");
+        input.setHintTextColor(app.muted);
+        input.setBackgroundColor(android.graphics.Color.TRANSPARENT);
+        input.setPaddingRelative(app.dp(8), app.dp(10), app.dp(6), app.dp(10));
         input.setMaxLines(3);
-        input.setTextColor(INK);
+        input.setTextColor(app.ink);
         input.setTextSize(15);
         input.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE);
-        input.setGravity(Gravity.TOP | Gravity.START);
-        app.add(composer, input, 0);
+        input.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+
         attachmentStrip = new HorizontalScrollView(app);
         attachments = new LinearLayout(app);
         attachmentStrip.addView(attachments);
@@ -181,10 +190,10 @@ final class DeviceChat {
         LinearLayout actions = new LinearLayout(app);
         actions.setGravity(Gravity.CENTER_VERTICAL);
         actions.addView(choose);
-        actions.addView(new View(app), new LinearLayout.LayoutParams(0, 1, 1));
+        actions.addView(input, new LinearLayout.LayoutParams(0,-2,1));
         actions.addView(send);
         app.add(composer, actions, 2);
-        status = app.label(0, 12, MUTED, false);
+        status = app.label(0, 12, app.muted, false);
         status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         app.add(composer, status, 2);
         input.addTextChangedListener(new TextWatcher() {
@@ -237,7 +246,7 @@ final class DeviceChat {
         polling = false; busy = false;
         messages.clear(); files.clear(); received.clear();
         cleanupExport();
-        chooserRoom = ""; mac = "Mac"; notice = networkError = "";
+        chooserRoom = ""; mac = next == null ? "Mac" : next.mac().displayName(); notice = networkError = "";
         restoreDraft();
         clearedThrough = next == null ? 0 : SyncSettings.preferences(app).getLong("chat.cleared." + draftKey(), 0);
         lastRead = next == null ? 0 : SyncSettings.preferences(app).getLong("chat.read." + next.receiverId(), 0);
@@ -303,7 +312,7 @@ final class DeviceChat {
                 more = page.more();
                 post(owner, () -> {
                     networkError = "";
-                    mac = page.mac().isEmpty() ? "Mac" : page.mac();
+                    mac = page.mac().isEmpty() || "Mac".equals(page.mac()) ? pair.mac().displayName() : page.mac();
                     for (ChatTransport.Message item : page.messages()) {
                         if (item.sequence() > clearedThrough) { messages.add(item); }
                     }
@@ -332,7 +341,8 @@ final class DeviceChat {
         int unread = 0;
         for (ChatTransport.Message m : messages) { if (!m.mine() && m.sequence() > lastRead) { unread++; } }
         String chatTitle = app.getString(R.string.chat_open, mac);
-        entryTitle.setText(unread > 0 ? app.getString(R.string.chat_with_unread, chatTitle, unread) : chatTitle);
+        String entryText = app.getString(R.string.chat_entry);
+        entryTitle.setText(unread > 0 ? app.getString(R.string.chat_with_unread, entryText, unread) : entryText);
         title.setText(mac);
         page.setAccessibilityPaneTitle(chatTitle);
         ChatTransport.Message last = messages.isEmpty() ? null : messages.get(messages.size() - 1);
@@ -357,25 +367,33 @@ final class DeviceChat {
         history.removeAllViews();
         history.setGravity(messages.isEmpty() ? Gravity.CENTER : Gravity.TOP);
         if (messages.isEmpty()) {
-            TextView empty = app.label(0, 13, MUTED, false); empty.setText("暂无消息"); empty.setGravity(Gravity.CENTER); app.add(history, empty, 0);
+            TextView empty = app.label(0, 13, app.muted, false); empty.setText("暂无消息"); empty.setGravity(Gravity.CENTER); app.add(history, empty, 0);
         }
         for (ChatTransport.Message m : messages) {
             LinearLayout row = app.column();
             row.setGravity(m.mine() ? Gravity.END : Gravity.START);
             row.setPaddingRelative(m.mine() ? app.dp(32) : 0, 0, m.mine() ? 0 : app.dp(32), 0);
-            TextView stamp = app.label(0, 12, MUTED, false);
+            TextView stamp = app.label(0, 12, app.muted, false);
             stamp.setText((m.mine() ? "我" : mac) + " · " + DateFormat.getTimeInstance(DateFormat.SHORT).format(new Date(m.time())));
             row.addView(stamp, -2, -2);
-            TextView bubble = app.label(0, 15, INK, false);
+            TextView bubble = app.label(0, 15, app.ink, false);
             bubble.setText(m.file() ? m.name() + " · " + size(m.bytes()) : m.text());
-            bubble.setTextIsSelectable(true);
+            bubble.setTextIsSelectable(m.file());
             bubble.setPadding(app.dp(10), app.dp(7), app.dp(10), app.dp(7));
-            bubble.setBackground(app.shape(m.mine() ? 0xffe4edff : 0xfff1f4f9, 0xffe0e6ee, 9));
+            bubble.setBackground(app.shape(m.mine() ? app.tint : app.panel, app.border, 14));
             row.addView(bubble, -2, -2);
             if (!m.file()) {
-                action(row, "复制", () -> {
-                    app.getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText("即图", m.text()));
-                    notice = "已复制"; render();
+                bubble.setOnLongClickListener(view -> {
+                    copyMessage(m.text());
+                    return true;
+                });
+                bubble.setFocusable(true);
+                bubble.setAccessibilityDelegate(new View.AccessibilityDelegate() {
+                    @Override public void onInitializeAccessibilityNodeInfo(View host, AccessibilityNodeInfo info) {
+                        super.onInitializeAccessibilityNodeInfo(host, info);
+                        info.addAction(new AccessibilityNodeInfo.AccessibilityAction(
+                            AccessibilityNodeInfo.ACTION_LONG_CLICK, app.getString(R.string.chat_copy)));
+                    }
                 });
             } else {
                 if (!m.mine()) { action(row, received.contains(m.id()) ? "再次保存" : "接收", () -> download(m, false)); }
@@ -384,6 +402,12 @@ final class DeviceChat {
             app.add(history, row, 7);
         }
         if (followLatest) { scroll.post(() -> scroll.scrollTo(0, history.getHeight())); }
+    }
+
+    private void copyMessage(String text) {
+        app.getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText("即图", text));
+        notice = "已复制";
+        render();
     }
 
     private void action(LinearLayout parent, String label, Runnable click) {
@@ -406,14 +430,14 @@ final class DeviceChat {
 
         LinearLayout options = app.column();
         options.setPadding(app.dp(22), app.dp(10), app.dp(22), 0);
-        TextView description = app.label(0, 14, INK, false);
+        TextView description = app.label(0, 14, app.ink, false);
         description.setText("将从这部手机清除与 " + mac + " 的 " + count + " 条记录。Mac 上的记录会保留。");
         app.add(options, description, 0);
         CheckBox deleteFiles = new CheckBox(app);
         deleteFiles.setText("同时删除已保存的本机文件（" + saved.size() + " 个）");
         deleteFiles.setEnabled(!saved.isEmpty());
         app.add(options, deleteFiles, 10);
-        TextView help = app.label(0, 13, MUTED, false);
+        TextView help = app.label(0, 13, app.muted, false);
         help.setText("旧版保存的文件、另存的副本可在系统文件管理器中清理。");
         app.add(options, help, 2);
         AlertDialog dialog = new AlertDialog.Builder(app).setTitle("清除本机对话记录？").setView(options)

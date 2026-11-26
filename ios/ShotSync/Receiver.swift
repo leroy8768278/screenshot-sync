@@ -3,17 +3,54 @@ import Darwin
 import Foundation
 import Security
 
+struct MacProfile: Codable, Equatable {
+    let name: String?
+    private let family: String
+
+    private static let familyNames = [
+        "mac-mini": "Mac mini", "mac-studio": "Mac Studio", "imac": "iMac",
+        "mac-pro": "Mac Pro", "macbook-air": "MacBook Air", "macbook-pro": "MacBook Pro",
+        "macbook": "MacBook", "macbook-neo": "MacBook Neo",
+    ]
+
+    init?(name: String?, family: String?) {
+        guard name != nil || family != nil else { return nil }
+        let cleaned = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let displayable = cleaned.unicodeScalars.allSatisfy { scalar in
+            switch scalar.properties.generalCategory {
+            case .control, .lineSeparator, .paragraphSeparator: false
+            case .format: scalar.value == 0x200C || scalar.value == 0x200D
+            default: true
+            }
+        }
+        self.name = !cleaned.isEmpty && cleaned.utf16.count <= 256 && displayable ? cleaned : nil
+        self.family = family.flatMap { Self.familyNames[$0] != nil ? $0 : nil } ?? "mac"
+    }
+
+    var familyName: String { Self.familyNames[family] ?? "Mac" }
+    var artwork: String {
+        guard Self.familyNames[family] != nil else { return "receiver_mac" }
+        return "receiver_" + family.replacingOccurrences(of: "-", with: "_")
+    }
+}
+
 struct Receiver: Codable, Equatable {
     let address: String
     let port: Int
     let code: String
     var automatic: Bool
     var pairedAt: Date?
+    var macProfile: MacProfile?
 
     var displayAddress: String { "\(address):\(port)" }
+    var displayName: String { macProfile?.name ?? macProfile?.familyName ?? "Mac" }
     var historyKey: String { digest(code) }
 
-    init(address: String, port: String, code: String, automatic: Bool, pairedAt: Date? = nil) throws {
+    func isSamePairing(as other: Receiver) -> Bool {
+        code == other.code && address == other.address && port == other.port && pairedAt == other.pairedAt
+    }
+
+    init(address: String, port: String, code: String, automatic: Bool, pairedAt: Date? = nil, macProfile: MacProfile? = nil) throws {
         let address = address.trimmingCharacters(in: .whitespacesAndNewlines)
         var binaryAddress = in_addr()
         guard inet_pton(AF_INET, address, &binaryAddress) == 1 else {
@@ -43,6 +80,7 @@ struct Receiver: Codable, Equatable {
         self.code = code
         self.automatic = automatic
         self.pairedAt = pairedAt
+        self.macProfile = macProfile
     }
 
     func request(path: String) -> URLRequest {
@@ -83,6 +121,30 @@ private struct PairingCode: Decodable {
 }
 
 final class ReceiverClient: NSObject, URLSessionTaskDelegate {
+    typealias UploadProgress = @MainActor @Sendable (_ sent: Int64, _ total: Int64) -> Void
+    private let bodySize: Int64
+    private let onProgress: UploadProgress?
+
+    private init(byteCount: Int64 = 0, onProgress: UploadProgress? = nil) {
+        self.bodySize = byteCount
+        self.onProgress = onProgress
+    }
+
+    static func uploadDelegate(byteCount: Int64, onProgress: UploadProgress?) -> URLSessionTaskDelegate? {
+        guard let onProgress, byteCount > 0 else { return nil }
+        return ReceiverClient(byteCount: byteCount, onProgress: onProgress)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64,
+                    totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        guard let onProgress else { return }
+        let sent = min(totalBytesSent, bodySize)
+        let previous = max(0, totalBytesSent - bytesSent)
+        // Only publish changes the integer percentage can display, plus the first and last write.
+        guard previous == 0 || sent == bodySize || sent * 100 / bodySize > previous * 100 / bodySize else { return }
+        Task { @MainActor in onProgress(sent, bodySize) }
+    }
+
     private static let session = makeSession(requestTimeout: 8, resourceTimeout: 20)
     private static let videoSession = makeSession(requestTimeout: 25, resourceTimeout: 600)
 
@@ -100,13 +162,18 @@ final class ReceiverClient: NSObject, URLSessionTaskDelegate {
         return URLSession(configuration: configuration, delegate: ReceiverClient(), delegateQueue: nil)
     }
 
-    static func check(_ receiver: Receiver) async throws {
-        struct Health: Decodable { let status: String }
+    static func check(_ receiver: Receiver) async throws -> Receiver {
         let (data, response) = try await session.data(for: receiver.request(path: "/v1/health"))
+        if (response as? HTTPURLResponse)?.statusCode == 204 { return receiver }
         try validate(response)
         guard (response as? HTTPURLResponse)?.statusCode == 200,
-              let body = try? JSONDecoder().decode(Health.self, from: data),
-              body.status == "ok" else { throw SyncIssue.invalidResponse }
+              let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              body["status"] as? String == "ok" else { throw SyncIssue.invalidResponse }
+        var verified = receiver
+        if let profile = MacProfile(name: body["macName"] as? String, family: body["macFamily"] as? String) {
+            verified.macProfile = profile
+        }
+        return verified
     }
 
     static func verifiedReceiver(in qr: String) async throws -> Receiver {
@@ -116,8 +183,7 @@ final class ReceiverClient: NSObject, URLSessionTaskDelegate {
             var lastError: Error = URLError(.cannotConnectToHost)
             func probe(_ candidate: Receiver) async -> Result<Receiver, Error> {
                 do {
-                    try await check(candidate)
-                    return .success(candidate)
+                    return .success(try await check(candidate))
                 } catch { return .failure(error) }
             }
             for _ in 0..<min(3, candidates.count) {
@@ -163,15 +229,23 @@ final class ReceiverClient: NSObject, URLSessionTaskDelegate {
         }
     }
 
-    static func send(_ image: ScreenshotData, named filename: String, id: String, to receiver: Receiver) async throws {
+    static func send(_ image: ScreenshotData, named filename: String, id: String, to receiver: Receiver,
+                     onProgress: UploadProgress? = nil) async throws {
         let request = await uploadRequest(mimeType: image.mimeType, filename: filename, id: id, receiver: receiver)
-        let (_, response) = try await session.upload(for: request, from: image.bytes)
+        let size = Int64(image.bytes.count)
+        await onProgress?(0, size)
+        let (_, response) = try await session.upload(for: request, from: image.bytes,
+                                                    delegate: uploadDelegate(byteCount: size, onProgress: onProgress))
         try validate(response)
     }
 
-    static func send(_ video: SelectedVideo, named filename: String, id: String, to receiver: Receiver) async throws {
+    static func send(_ video: SelectedVideo, named filename: String, id: String, to receiver: Receiver,
+                     onProgress: UploadProgress? = nil) async throws {
         let request = await uploadRequest(mimeType: video.mimeType, filename: filename, id: id, receiver: receiver)
-        let (_, response) = try await videoSession.upload(for: request, fromFile: video.file)
+        let size = Int64(video.byteCount)
+        await onProgress?(0, size)
+        let (_, response) = try await videoSession.upload(for: request, fromFile: video.file,
+                                                         delegate: uploadDelegate(byteCount: size, onProgress: onProgress))
         try validate(response, video: true)
     }
 
@@ -246,7 +320,7 @@ enum ReceiverStore {
         let receiver = try JSONDecoder().decode(Receiver.self, from: data)
         return try Receiver(
             address: receiver.address, port: String(receiver.port), code: receiver.code,
-            automatic: receiver.automatic, pairedAt: receiver.pairedAt
+            automatic: receiver.automatic, pairedAt: receiver.pairedAt, macProfile: receiver.macProfile
         )
     }
 
@@ -269,8 +343,21 @@ enum ReceiverStore {
     }
 }
 
+struct TransferReceipt: Codable, Identifiable {
+    enum Kind: String, Codable { case screenshot, photo, video }
+
+    let id: String
+    let kind: Kind
+    let delivered: Date
+    var captured: Date? = nil
+    let bytes: Int
+    let thumbnail: Data?
+}
+
 struct SyncHistory {
     private let file: URL
+    private let receiptFile: URL
+    private(set) var recent: [TransferReceipt]
     private(set) var sent: Set<String>
     private(set) var lastSent: Date?
 
@@ -282,6 +369,12 @@ struct SyncHistory {
         try directory.setResourceValues(values)
         let file = directory.appending(path: "\(key).log")
         self.file = file
+        receiptFile = directory.appending(path: "\(key).recent.json")
+        if FileManager.default.fileExists(atPath: receiptFile.path) {
+            recent = (try? JSONDecoder().decode([TransferReceipt].self, from: Data(contentsOf: receiptFile))) ?? []
+        } else {
+            recent = []
+        }
         if FileManager.default.fileExists(atPath: file.path) {
             let data = try Data(contentsOf: file)
             let contents = String(decoding: data, as: UTF8.self)
@@ -295,7 +388,20 @@ struct SyncHistory {
         }
     }
 
-    mutating func markSent(_ id: String) throws {
+    mutating func clearRecent(ids: Set<String>) throws {
+        let remaining = recent.filter { !ids.contains($0.id) }
+        guard remaining.count != recent.count else { return }
+        try JSONEncoder().encode(remaining).write(to: receiptFile, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        recent = remaining
+    }
+
+    mutating func markSent(_ receipt: TransferReceipt) throws {
+        let id = receipt.id
+        let updated = [receipt] + recent.lazy.filter { $0.id != id }.prefix(19)
+        let list = Array(updated)
+        // Save the confirmed receipt first. A retry after an interrupted log append is
+        // idempotent on the Mac and replaces the same receipt here.
+        try JSONEncoder().encode(list).write(to: receiptFile, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         // A leading newline separates new records from any interrupted write.
         let data = Data("\n\(id)\n".utf8)
         if FileManager.default.fileExists(atPath: file.path) {
@@ -308,7 +414,8 @@ struct SyncHistory {
             try data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         }
         sent.insert(id)
-        lastSent = .now
+        lastSent = receipt.delivered
+        recent = list
     }
 }
 

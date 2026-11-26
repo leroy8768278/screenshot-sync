@@ -1,0 +1,44 @@
+{
+  "color": [
+    {
+      "name": "window_background",
+      "value": "#101B17"
+    },
+    {
+      "name": "ink",
+      "value": "#E6F1EA"
+    },
+    {
+      "name": "secondary_text",
+      "value": "#A3BAAD"
+    },
+    {
+      "name": "soft",
+      "value": "#243A30"
+    },
+    {
+      "name": "surface",
+      "value": "#1A2822"
+    },
+    {
+      "name": "line",
+      "value": "#33493E"
+    },
+    {
+      "name": "bubble",
+      "value": "#254336"
+    },
+    {
+      "name": "accent_text",
+      "value": "#A4DCC0"
+    },
+    {
+      "name": "warning",
+      "value": "#FFAAA3"
+    },
+    {
+      "name": "dock",
+      "value": "#F01B2B23"
+    }
+  ]
+}

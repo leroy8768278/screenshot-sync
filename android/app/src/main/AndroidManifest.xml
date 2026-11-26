@@ -34,7 +34,7 @@
         <activity
             android:name=".PairingScanActivity"
             android:exported="false"
-            android:theme="@style/zxing_CaptureTheme" />
+            android:theme="@style/PairingCameraTheme" />
         <service
             android:name=".ScreenshotMonitor"
             android:exported="false"

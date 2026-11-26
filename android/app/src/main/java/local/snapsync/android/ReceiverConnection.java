@@ -93,7 +93,7 @@ final class ReceiverConnection implements AutoCloseable {
         }
     }
 
-    private static boolean isNonDisplayable(int codePoint) {
+    static boolean isNonDisplayable(int codePoint) {
         return switch (Character.getType(codePoint)) {
             case Character.CONTROL, Character.LINE_SEPARATOR, Character.PARAGRAPH_SEPARATOR -> true;
             case Character.FORMAT -> codePoint != 0x200C && codePoint != 0x200D;
@@ -101,7 +101,9 @@ final class ReceiverConnection implements AutoCloseable {
         };
     }
 
-    int test() throws IOException {
+    record Health(int status, MacProfile mac) {}
+
+    Health test() throws IOException {
         HttpURLConnection connection = open("/v1/health");
         try {
             connection.setRequestMethod("GET");
@@ -110,16 +112,16 @@ final class ReceiverConnection implements AutoCloseable {
             int status = connection.getResponseCode();
             if (status == 200) {
                 try (InputStream body = connection.getInputStream()) {
-                    checkHealth(body);
+                    return new Health(status, checkHealth(body));
                 }
             }
-            return status;
+            return new Health(status, MacProfile.UNKNOWN);
         } finally {
             release(connection);
         }
     }
 
-    private static void checkHealth(InputStream body) throws IOException {
+    private static MacProfile checkHealth(InputStream body) throws IOException {
         ByteArrayOutputStream response = new ByteArrayOutputStream();
         byte[] buffer = new byte[512];
         int count;
@@ -133,13 +135,20 @@ final class ReceiverConnection implements AutoCloseable {
         String payload = new String(response.toByteArray(), StandardCharsets.UTF_8);
         try (JsonReader json = new JsonReader(new StringReader(payload))) {
             boolean healthy = false;
+            String macName = "";
+            String macFamily = "";
             json.beginObject();
             while (json.hasNext()) {
-                if ("status".equals(json.nextName())) {
+                String key = json.nextName();
+                if ("status".equals(key)) {
                     if (healthy || json.peek() != JsonToken.STRING || !"ok".equals(json.nextString())) {
                         throw new IOException("Invalid receiver status");
                     }
                     healthy = true;
+                } else if ("macName".equals(key) && json.peek() == JsonToken.STRING) {
+                    macName = json.nextString();
+                } else if ("macFamily".equals(key) && json.peek() == JsonToken.STRING) {
+                    macFamily = json.nextString();
                 } else {
                     json.skipValue();
                 }
@@ -148,6 +157,7 @@ final class ReceiverConnection implements AutoCloseable {
             if (!healthy || json.peek() != JsonToken.END_DOCUMENT) {
                 throw new IOException("Invalid receiver response");
             }
+            return MacProfile.from(macName, macFamily);
         } catch (IllegalStateException malformed) {
             throw new IOException("Invalid receiver response", malformed);
         }

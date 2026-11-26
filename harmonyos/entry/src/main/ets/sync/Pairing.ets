@@ -1,7 +1,9 @@
 import { common } from '@kit.AbilityKit';
-import { util } from '@kit.ArkTS';
+import { buffer, util } from '@kit.ArkTS';
 import { fileIo } from '@kit.CoreFileKit';
 import { isLocalAddress, isPairingCode } from './Protocol';
+
+import { MacProfile, macProfile } from './MacProfile';
 
 export class Pairing {
   constructor(
@@ -11,7 +13,8 @@ export class Pairing {
     public installation: string,
     public destination: string,
     public enabled: boolean,
-    public revision: number
+    public revision: number,
+    public mac?: MacProfile
   ) {}
 }
 
@@ -36,6 +39,7 @@ export function loadPairing(context: common.Context): Pairing | undefined {
     !Number.isSafeInteger(value.revision) || value.revision < 0) {
     throw new Error('本机配对设置无法读取');
   }
+  value.mac = macProfile(value.mac?.name, value.mac?.family);
   return value;
 }
 
@@ -44,7 +48,7 @@ function randomID(): string {
 }
 
 export function createPairing(
-  context: common.Context, host: string, token: string, verifiedAt: number, previous?: Pairing
+  context: common.Context, host: string, token: string, verifiedAt: number, mac: MacProfile, previous?: Pairing
 ): Pairing {
   const sameDestination: boolean = previous !== undefined && previous.token === token;
   const installationPath: string = pathFor(context) + '.installation';
@@ -55,12 +59,12 @@ export function createPairing(
   // Older versions stored the most recent app launch time. Only carry forward an authenticated cutoff.
   return new Pairing(host, token, (sameDestination ? previous?.pairedAfterMs : undefined) ?? verifiedAt, installation,
     sameDestination && previous ? previous.destination : randomID(),
-    previous?.enabled ?? true, (previous?.revision ?? verifiedAt) + 1);
+    previous?.enabled ?? true, (previous?.revision ?? verifiedAt) + 1, mac);
 }
 
 export function withSyncEnabled(pairing: Pairing, enabled: boolean): Pairing {
   return new Pairing(pairing.host, pairing.token, pairing.pairedAfterMs, pairing.installation, pairing.destination,
-    enabled, pairing.revision + 1);
+    enabled, pairing.revision + 1, pairing.mac);
 }
 
 export function clearPairing(context: common.Context): void {
@@ -81,7 +85,7 @@ function replaceFile(path: string, data: string): void {
   const file: fileIo.File = fileIo.openSync(temporaryPath,
     fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC | fileIo.OpenMode.WRITE_ONLY);
   try {
-    if (fileIo.writeSync(file.fd, data) !== data.length) {
+    if (fileIo.writeSync(file.fd, data) !== buffer.byteLength(data, 'utf-8')) {
       throw new Error('保存配对设置失败');
     }
     fileIo.fsyncSync(file.fd);

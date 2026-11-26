@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 320 200">
+  <title>即图 · Mac 接收设备插图</title>
+  <defs>
+    <linearGradient id="rm-top" x1="0" y1="0" x2=".85" y2="1">
+      <stop stop-color="#fbfdfc"/><stop offset=".54" stop-color="#dbe3e3"/><stop offset="1" stop-color="#b0bfc0"/>
+    </linearGradient>
+    <linearGradient id="rm-face" x1="0" y1="0" x2="1" y2=".08">
+      <stop stop-color="#72888b"/><stop offset=".08" stop-color="#a8b7b8"/><stop offset=".52" stop-color="#c9d4d3"/><stop offset=".65" stop-color="#8c9fa0"/><stop offset=".96" stop-color="#586d71"/><stop offset="1" stop-color="#43595e"/>
+    </linearGradient>
+    <linearGradient id="rm-dark" x1="0" y1="0" x2=".9" y2="1">
+      <stop stop-color="#acb9be"/><stop offset=".42" stop-color="#84959b"/><stop offset="1" stop-color="#4d6068"/>
+    </linearGradient>
+    <linearGradient id="rm-air" x2=".75" y2="1">
+      <stop stop-color="#eff7f6"/><stop offset=".55" stop-color="#accac9"/><stop offset="1" stop-color="#86a5a8"/>
+    </linearGradient>
+    <linearGradient id="rm-neo" x2=".8" y2="1">
+      <stop stop-color="#f3f4d8"/><stop offset=".55" stop-color="#dce4b3"/><stop offset="1" stop-color="#b7c69b"/>
+    </linearGradient>
+    <linearGradient id="rm-gold" x2=".85" y2="1">
+      <stop stop-color="#f7e9d7"/><stop offset=".5" stop-color="#d8bc9e"/><stop offset="1" stop-color="#b49c85"/>
+    </linearGradient>
+    <linearGradient id="rm-glass" x1="0" y1="0" x2=".75" y2="1">
+      <stop stop-color="#fbfff9" stop-opacity=".22"/><stop offset=".48" stop-color="#f9fcff" stop-opacity=".03"/><stop offset="1" stop-color="#071921" stop-opacity=".1"/>
+    </linearGradient>
+    <radialGradient id="rm-shadow"><stop stop-color="#23322e" stop-opacity=".4"/><stop offset=".65" stop-color="#1a3330" stop-opacity=".15"/><stop offset="1" stop-color="#19302d" stop-opacity="0"/></radialGradient>
+    <pattern id="rm-keys" patternUnits="userSpaceOnUse" width="10" height="6"><rect x=".7" y=".6" width="8.3" height="4.3" rx=".8" fill="#26393e"/></pattern>
+    <pattern id="rm-keys-light" patternUnits="userSpaceOnUse" width="10" height="6"><rect x=".7" y=".6" width="8.3" height="4.3" rx=".8" fill="#f5f4da" stroke="#acb597" stroke-width=".55"/></pattern>
+    <pattern id="rm-holes" patternUnits="userSpaceOnUse" width="8" height="12"><circle cx="2.2" cy="2.5" r="1.7" fill="#5c7174"/><circle cx="6.1" cy="8.5" r="1.7" fill="#52676b"/><path d="M1 4a2 2 0 0 0 2.5-.3m1.2 5.6a2 2 0 0 0 2.5-.3" fill="none" stroke="#e0e9e5" stroke-width=".7"/></pattern>
+    <clipPath id="rm-screen-clip"><rect width="172" height="103" rx="3.8"/></clipPath>
+    <g id="rm-landscape" clip-path="url(#rm-screen-clip)">
+      <rect width="172" height="103" fill="var(--rm-sky,#94b9b4)"/>
+      <path d="M-12 71C32 73 54 24 101 37c33 9 45 4 79-11v85H-12Z" fill="var(--rm-haze,#d0ded0)"/>
+      <path d="M-9 76c49-32 61-8 94-13 32-4 45-35 99-30v78H-9Z" fill="var(--rm-hill,#689e90)"/>
+      <path d="M-10 93c46-6 54-29 91-22 35 7 51-20 101-27v69H-10Z" fill="var(--rm-ridge,#42746d)"/>
+      <path d="M-8 104c41-29 60-17 101-27 38-9 50-8 89-17v51H-8Z" fill="var(--rm-fore,#235750)"/>
+      <rect width="172" height="103" fill="url(#rm-glass)"/>
+    </g>
+    <g id="rm-notebook-display">
+      <rect x="-4.4" y="-4.5" width="181" height="114" rx="6.3" fill="#263134" stroke="currentColor" stroke-width="2.3"/>
+      <use xlink:href="#rm-landscape"/><rect x="1" y="104" width="170" height="3.4" rx="1" fill="#202a2c"/>
+    </g>
+    <g id="rm-notebook-deck">
+      <path d="M74 125l174 6.8 29 22.4q4.2 3.3-2 4l-205-6.5-31-3q-4.6-.5-1.4-3.3Z"/>
+      <g transform="matrix(.93 .035 -.68 .37 88 128)">
+        <rect x="0" y="0" width="154" height="31" rx="3.8" fill="var(--rm-key-fill,url(#rm-keys))"/>
+        <rect x="53" y="32" width="43" height="3" rx="1" fill="var(--rm-space,#2a3d42)"/>
+        <rect x="51" y="38" width="52" height="13" rx="2.4" fill="none" stroke="var(--rm-track,#80999a)" stroke-width="1.4"/>
+      </g>
+      <path d="M39 148q-3-.5-2.4-2.2-1.2 3.1 2.6 4.2l31.1 3 204.7 6.3q5.4-.3 3.2-3.6-1.1 1.6-4 1.7l-204-6.2Z" fill="var(--rm-lip,#8d9c9f)"/>
+      <path d="m137 153.5 32.5.9" stroke="#536569" opacity=".7" stroke-width="1.4" stroke-linecap="round"/>
+    </g>
+    <g id="rm-top-emblem" fill="none" stroke="#819695" stroke-width="1.7"><rect x="-5.7" y="-5.7" width="11.4" height="11.4" rx="3.2"/><path d="M-2 1h4" stroke-linecap="round"/></g>
+  </defs>
+
+  <symbol id="rm-mac-mini" viewBox="0 0 320 200">
+    <ellipse cx="158" cy="153" rx="135" ry="23" fill="url(#rm-shadow)"/>
+    <path d="M46 86Q44 81 58 74l82-34q12-5 25-2l96 25q12 3 12 11v37q0 5-10 10l-80 35q-11 4-23 1L57 131q-12-3-12-12Z" fill="url(#rm-face)"/>
+    <path d="M47 82q0-5 12-10l82-34q11-5 24-2l96 25q18 5 7 12l-84 37q-10 4-23 1L59 85q-7-1-12-3Z" fill="url(#rm-top)" stroke="#e1eae6" stroke-width="1.1"/>
+    <use xlink:href="#rm-top-emblem" transform="matrix(1 .26 -1 .43 158 72)"/>
+    <g transform="matrix(1 .25 0 1 67 109)" fill="#35494d"><rect width="13" height="4" rx="1.8"/><rect x="18" width="13" height="4" rx="1.8"/><circle cx="43" cy="2" r="2.3"/><circle cx="87" cy="2" r="1.5" fill="#f4faf5"/></g>
+  </symbol>
+  <symbol id="rm-mac-studio" viewBox="0 0 320 200">
+    <ellipse cx="162" cy="171" rx="133" ry="17" fill="url(#rm-shadow)"/>
+    <path d="M48 64q-1-5 12-10l82-31q9-4 20-2l99 23q13 4 13 10v72q0 7-10 12l-82 34q-10 4-23 1L58 149q-10-2-10-10Z" fill="url(#rm-face)"/>
+    <path d="M49 60q0-4 11-8l82-31q11-4 21-2l99 24q17 4 9 11l-88 36q-10 4-22 1L58 65q-8-2-9-5Z" fill="url(#rm-top)" stroke="#e1eae6" stroke-width="1.1"/>
+    <use xlink:href="#rm-top-emblem" transform="matrix(1 .24 -1 .42 159 56)"/>
+    <g transform="matrix(1 .25 0 1 69 119)" fill="#384d51"><rect width="10.5" height="4" rx="1.4"/><rect x="15" width="10.5" height="4" rx="1.4"/><rect x="53" y="1" width="21" height="2.3" rx=".9"/><circle cx="82" cy="2" r="1.5" fill="#f6fbf4"/></g>
+    <path d="m180 168 81-34" stroke="#51666a" opacity=".65" stroke-width="1.5"/>
+  </symbol>
+  <symbol id="rm-macbook-pro" viewBox="0 0 320 200">
+    <ellipse cx="155" cy="163" rx="139" ry="16" fill="url(#rm-shadow)"/>
+    <g transform="translate(-4 -4) scale(1.03 1.04)" style="--rm-sky:#667f9b;--rm-haze:#b5c6ce;--rm-hill:#657d92;--rm-ridge:#426074;--rm-fore:#244352;color:#819398">
+      <use xlink:href="#rm-notebook-display" transform="matrix(1 .039 -.09 1 82 18)"/>
+      <path d="m154 20 26 1-.5 4q-.3 2-2 1.9l-21-.8q-2-.1-2-2Z" fill="#252f31"/>
+      <use xlink:href="#rm-notebook-deck" fill="url(#rm-dark)" style="--rm-lip:#586c73"/>
+      <path d="m40 151 29 3 205 6.3" fill="none" stroke="#596c70" stroke-width="2.4"/>
+    </g>
+  </symbol>
+  <symbol id="rm-macbook-air" viewBox="0 0 320 200">
+    <ellipse cx="158" cy="161" rx="133" ry="14" fill="url(#rm-shadow)"/>
+    <g style="color:#b5cdce">
+      <use xlink:href="#rm-notebook-display" transform="matrix(1 .039 -.105 .95 84 24)"/>
+      <path d="m155 27 23 .8-.3 2.8q-.1 1.5-2 1.5l-19-.7q-1.6 0-1.6-1.4Z" fill="#253638"/>
+      <use xlink:href="#rm-notebook-deck" fill="url(#rm-air)"/>
+    </g>
+  </symbol>
+  <symbol id="rm-macbook-neo" viewBox="0 0 320 200">
+    <ellipse cx="158" cy="163" rx="123" ry="14" fill="url(#rm-shadow)"/>
+    <g transform="translate(9 11) scale(.94)" style="color:#cdd5a5;--rm-sky:#a2bb96;--rm-haze:#f0edce;--rm-hill:#bed1a1;--rm-ridge:#8ba884;--rm-fore:#587e68">
+      <use xlink:href="#rm-notebook-display" transform="matrix(1 .039 -.09 .96 82 22)"/>
+      <use xlink:href="#rm-notebook-deck" fill="url(#rm-neo)" style="--rm-key-fill:url(#rm-keys-light);--rm-space:#f5f4da;--rm-lip:#9ba784"/>
+    </g>
+  </symbol>
+  <symbol id="rm-macbook" viewBox="0 0 320 200">
+    <ellipse cx="158" cy="161" rx="122" ry="13" fill="url(#rm-shadow)"/>
+    <g transform="translate(16 10) scale(.90 .94)" style="color:#c2a88a;--rm-sky:#c9a58d;--rm-haze:#ebd7b9;--rm-hill:#c3a38c;--rm-ridge:#aa846e;--rm-fore:#805f53">
+      <use xlink:href="#rm-notebook-display" transform="matrix(1 .039 -.09 .99 82 19)"/>
+      <use xlink:href="#rm-notebook-deck" fill="url(#rm-gold)" style="--rm-lip:#ad9984"/>
+    </g>
+  </symbol>
+  <symbol id="rm-imac" viewBox="0 0 320 200">
+    <ellipse cx="158" cy="178" rx="90" ry="13" fill="url(#rm-shadow)"/>
+    <path d="m144 134 21 1 4.5 31q1 5 6.5 6l17 3q3 .8.2 3l-50 1-12-2q-2-1 1-2l12-4q3-1 3-5Z" fill="url(#rm-face)" stroke="#94a9a7" stroke-width="1.1"/>
+    <g transform="matrix(1.10 .045 0 1.02 64 13)" style="--rm-sky:#89aaa4;--rm-haze:#e5ebd4;--rm-hill:#abc5b5;--rm-ridge:#77a494;--rm-fore:#498878">
+      <rect x="-5" y="-3" width="184" height="134" rx="6" fill="#789b93"/>
+      <rect x="-5" y="-4" width="181" height="132" rx="5.5" fill="#d9e5df" stroke="#eef6ee" stroke-width="1.1"/>
+      <use xlink:href="#rm-landscape" transform="translate(-.8 1) scale(1 .99)"/>
+      <path d="M-5 108h181v15.5q0 4.5-5 4.5H0q-5 0-5-4.5Z" fill="#b1c9be"/>
+      <circle cx="85" cy="-1.4" r="1.15" fill="#627975"/>
+    </g>
+  </symbol>
+  <symbol id="rm-mac-pro" viewBox="0 0 320 200">
+    <ellipse cx="160" cy="175" rx="95" ry="15" fill="url(#rm-shadow)"/>
+    <path d="m89 51 76 14 65-33-77-13Z" fill="url(#rm-top)" stroke="#becac7" stroke-width="1.1"/>
+    <path d="m164 65 66-32v107l-66 36Z" fill="url(#rm-face)" stroke="#83989b" stroke-width="1.1"/>
+    <path d="m90 49 75 14v111l-75-14Z" fill="url(#rm-top)" stroke="#a3b5b5" stroke-width="1.2"/>
+    <g transform="matrix(1 .19 0 1 97 57)"><rect width="61" height="97" fill="url(#rm-holes)"/></g>
+    <path d="m96 158 6 1v12l-4 1-3-2Zm62 12 6 1v12l-4 1-3-2Zm63-31 6-2v9l-5 3-1-2Z" fill="#6a8184"/>
+    <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m95 49 .5-11q.1-5.5 6-4.4l52.3 10q5.8 1.2 5.7 7.1l-.2 11.2m.7-41.2v-9.5q0-4.6 5.4-3.8l53.3 9.6q5.7 1.1 5.7 6.6v9.4" stroke="#7f9395" stroke-width="5.7"/>
+      <path d="m94.8 46 .6-9.4q.6-4.8 6.5-3.5l50.8 9.5m7.4-24.3v-8q.1-3.7 5.3-2.9l51.2 9.2" stroke="#e5ece7" stroke-width="2.1"/>
+    </g>
+  </symbol>
+  <symbol id="rm-mac" viewBox="0 0 320 200">
+    <ellipse cx="160" cy="160" rx="85" ry="12" fill="url(#rm-shadow)"/>
+    <rect x="91" y="40" width="138" height="118" rx="23" fill="url(#rm-face)"/>
+    <rect x="92" y="38" width="136" height="115" rx="22" fill="url(#rm-top)" stroke="#ecf4ed" stroke-width="1.5"/>
+    <rect x="105" y="51" width="110" height="87" rx="15" fill="#325953"/>
+    <path d="M134 106V83l12 17 12-17v23m22-13q-14-3-14 6t11 5l3-4m0-7v13m19-12q-12-6-13 5 1 11 13 5" fill="none" stroke="#deeee5" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+</svg>

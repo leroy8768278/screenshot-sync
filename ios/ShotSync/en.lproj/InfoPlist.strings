@@ -1,5 +1,5 @@
 "CFBundleDisplayName" = "SnapRelay";
 "CFBundleName" = "SnapRelay";
-"NSPhotoLibraryUsageDescription" = "Automatically send screenshots taken after pairing to your Mac.";
+"NSPhotoLibraryUsageDescription" = "Full access to Photos lets SnapRelay detect new screenshots taken after pairing and automatically send them to your Mac over your local network.";
 "NSLocalNetworkUsageDescription" = "Connect to your paired Mac to sync screenshots, send selected photos and videos, and exchange text and files in device conversations.";
 "NSCameraUsageDescription" = "Scan the pairing QR code shown in SnapRelay on your Mac.";

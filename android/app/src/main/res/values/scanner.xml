@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="scan_cancel_label">取消</string>
+    <string name="scan_first_title">扫码连接 Mac</string>
+    <string name="scan_aim">对准 Mac 上的配对码</string>
+    <string name="scan_instructions">让两台设备接入同一局域网，在 Mac 版即图右上角点「扫码配对」。</string>
+    <string name="scan_current_mac">当前接收设备为「%1$s」，验证成功后切换。</string>
+    <style name="PairingCameraTheme" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:colorAccent">#B4E9CD</item>
+        <item name="android:windowBackground">#15231F</item>
+        <item name="android:statusBarColor">#15231F</item>
+        <item name="android:navigationBarColor">#15231F</item>
+    </style>
+</resources>

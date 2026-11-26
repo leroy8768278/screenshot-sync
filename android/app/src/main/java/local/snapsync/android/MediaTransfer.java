@@ -54,16 +54,15 @@ final class MediaTransfer {
                     return ALREADY_SENT;
                 }
                 String id = screenshotId == null ? contentId : screenshotId;
+                long bytes = Files.size(staged);
                 int status;
                 try (InputStream input = Files.newInputStream(staged)) {
-                    status = receiver.upload(input, Files.size(staged), id, pairing.deviceId(), filename, type, cancelled);
+                    status = receiver.upload(input, bytes, id, pairing.deviceId(), filename, type, cancelled);
                 }
                 if (status == 200 || status == 201) {
-                    if (screenshotId == null) {
-                        receipts.remember(receiverId, manualReceipt);
-                    } else {
-                        receipts.remember(receiverId, screenshotId, automaticReceipt);
-                    }
+                    boolean manual = screenshotId == null;
+                    receipts.delivered(receiverId, manual ? manualReceipt : screenshotId, automaticReceipt,
+                        uri, filename, type, bytes, manual);
                 }
                 return status;
             } finally {

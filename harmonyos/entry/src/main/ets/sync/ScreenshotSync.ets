@@ -1,3 +1,4 @@
+import { Delivery, recordDelivery } from './RecentTransfers';
 import { abilityAccessCtrl, common, Permissions } from '@kit.AbilityKit';
 import { dataSharePredicates } from '@kit.ArkData';
 import { fileIo } from '@kit.CoreFileKit';
@@ -142,7 +143,7 @@ export async function syncScreenshots(
         sending?.();
       }
       const alreadySent = await uploadImage(context, pairing, receiver, format, image,
-        (): boolean => !cancellation.stopped && isCurrentSync(context, pairing));
+        (): boolean => !cancellation.stopped && isCurrentSync(context, pairing), asset.displayName, false);
       if (alreadySent !== undefined) {
         if (receipt) {
           markReceipt(receipt);
@@ -182,7 +183,7 @@ export function markReceipt(path: string): void {
 /** Returns true for a prior delivery, false for a new delivery, and undefined on cancellation or rejection. */
 export async function uploadImage(
   context: common.Context, pairing: Pairing, receiver: Receiver, format: MediaFormat, data: ArrayBuffer,
-  current: () => boolean
+  current: () => boolean, displayName: string, manual: boolean
 ): Promise<boolean | undefined> {
   const hash: cryptoFramework.Md = cryptoFramework.createMd('SHA256');
   await hash.update({ data: new Uint8Array(data) });
@@ -202,6 +203,8 @@ export async function uploadImage(
     return undefined;
   }
   markReceipt(receipt);
+  await recordDelivery(context, pairing,
+    new Delivery(hex, displayName || filename, data.byteLength, Date.now(), manual, false), data);
   return false;
 }
 

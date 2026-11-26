@@ -10,11 +10,14 @@ import java.util.Locale;
 import java.util.UUID;
 
 final class SyncSettings {
+    static final String NEEDS_ATTENTION = "sync_needs_attention";
     static final String STATUS = "status";
     static final String LIVE_ENABLED = "live_enabled";
     static final int PORT = 43871;
     private static final String HOST = "host";
     private static final String CODE = "code";
+    private static final String MAC_NAME = "mac_name";
+    private static final String MAC_FAMILY = "mac_family";
     private static final String AUTO = "auto";
     private static final String PAUSED = "paused";
     private static final String CONNECTED_AT = "connected_at";
@@ -23,7 +26,7 @@ final class SyncSettings {
     private static final Object SETTINGS_LOCK = new Object();
 
     record Pairing(String host, String code, boolean paused, long connectedAt,
-                   String generation, String installation) {
+                   String generation, String installation, MacProfile mac) {
         boolean isConfigured() {
             return !host.isEmpty() && !code.isEmpty();
         }
@@ -70,12 +73,13 @@ final class SyncSettings {
                 prefs.getBoolean(PAUSED, false) || !prefs.getBoolean(AUTO, true),
                 prefs.getLong(CONNECTED_AT, 0),
                 prefs.getString(GENERATION, ""),
-                prefs.getString(INSTALLATION, "")
+                prefs.getString(INSTALLATION, ""),
+                MacProfile.from(prefs.getString(MAC_NAME, ""), prefs.getString(MAC_FAMILY, "mac"))
             );
         }
     }
 
-    static boolean saveVerified(Context context, String host, String code, long verifiedAt) {
+    static boolean saveVerified(Context context, String host, String code, long verifiedAt, MacProfile mac) {
         synchronized (SETTINGS_LOCK) {
             Pairing old = read(context);
             boolean sameReceiver = old.isConfigured() && old.code.equals(code);
@@ -87,6 +91,9 @@ final class SyncSettings {
             return preferences(context).edit()
                 .putString(HOST, host)
                 .putString(CODE, code)
+                .putString(MAC_NAME, mac.name())
+                .putString(MAC_FAMILY, mac.family().key)
+                .remove(NEEDS_ATTENTION)
                 .remove(AUTO)
                 .remove("launch_started_at")
                 .putBoolean(PAUSED, paused)
@@ -98,6 +105,18 @@ final class SyncSettings {
         }
     }
 
+    static boolean updateMac(Context context, Pairing pairing, MacProfile mac) {
+        synchronized (SETTINGS_LOCK) {
+            Pairing current = read(context);
+            if (!current.generation().equals(pairing.generation()) || mac.equals(current.mac())) {
+                return false;
+            }
+            preferences(context).edit()
+                .putString(MAC_NAME, mac.name()).putString(MAC_FAMILY, mac.family().key).apply();
+            return true;
+        }
+    }
+
     static boolean setPaused(Context context, boolean paused) {
         synchronized (SETTINGS_LOCK) {
             Pairing pairing = read(context);
@@ -105,6 +124,7 @@ final class SyncSettings {
                 return false;
             }
             return preferences(context).edit()
+                .remove(NEEDS_ATTENTION)
                 .remove(AUTO)
                 .putBoolean(PAUSED, paused)
                 .putString(GENERATION, UUID.randomUUID().toString())
@@ -118,8 +138,11 @@ final class SyncSettings {
             return preferences(context).edit()
                 .remove(HOST)
                 .remove(CODE)
+                .remove(MAC_NAME)
+                .remove(MAC_FAMILY)
                 .remove(CONNECTED_AT)
                 .remove(PAUSED)
+                .remove(NEEDS_ATTENTION)
                 .remove(AUTO)
                 .remove("launch_started_at")
                 .remove(STATUS)
@@ -135,7 +158,11 @@ final class SyncSettings {
     static void status(Context context, Pairing pairing, int message, Object... arguments) {
         synchronized (SETTINGS_LOCK) {
             if (isCurrent(context, pairing)) {
-                preferences(context).edit().putString(STATUS, context.getString(message, arguments)).apply();
+                boolean attention = message == R.string.status_bad_code || message == R.string.status_network
+                    || message == R.string.status_rejected || message == R.string.status_read_error
+                    || message == R.string.live_start_failed || message == R.string.status_skipped;
+                preferences(context).edit().putString(STATUS, context.getString(message, arguments))
+                    .putBoolean(NEEDS_ATTENTION, attention).apply();
             }
         }
     }

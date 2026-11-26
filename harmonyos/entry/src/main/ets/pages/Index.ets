@@ -4,17 +4,19 @@ import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { clearPairing, createPairing, loadPairing, Pairing, savePairing, withSyncEnabled } from '../sync/Pairing';
 import { ManualResult, SelectedMedia, selectMedia, sendSelection } from '../sync/ManualSync';
 import { isPairingCode, PairingTarget, parseReceiverHost, RECEIVER_PORT } from '../sync/Protocol';
+import { MacProfile, familyName, macArtwork, macDisplayName } from '../sync/MacProfile';
 import { findVerifiedHost, Receiver } from '../sync/Receiver';
 import { scanPairing } from '../sync/ScanPairing';
 import { GALLERY_PERMISSION, galleryAllowed, syncScreenshots, SyncCancellation, SyncResult } from '../sync/ScreenshotSync';
 import { updateSchedule } from '../work/Schedule';
 
+import { clearRecentTransfers, Delivery, lastDelivery, recentTransfers } from '../sync/RecentTransfers';
+import { chatSize } from '../sync/ChatTypes';
 import { ChatSession } from '../sync/ChatSession';
 import { ChatEntry, ChatPage } from './ChatPage';
 
-const BLUE: string = '#2359D7';
-const INK: string = '#162444';
-const MUTED: string = '#475975';
+const PINE: string = '#145848';
+const MIST: string = '#CCE2D7';
 const HOST_INPUT_ID: string = 'receiver-host-input';
 const TOKEN_INPUT_ID: string = 'receiver-token-input';
 const CHAT_ROUTE: string = 'conversation';
@@ -36,8 +38,10 @@ struct Index {
   @State private host: string = '';
   @State private token: string = '';
   @State private syncEnabled: boolean = false;
+  @State private macUnreachable: boolean = false;
   @State private hasPairing: boolean = false;
   @State private activeHost: string = '';
+  @State private mac: MacProfile = new MacProfile();
   @State private chat: ChatSession | undefined = undefined;
   @State private cutoffLabel: string = '';
   @State private showSettings: boolean = false;
@@ -47,6 +51,9 @@ struct Index {
   @State private uploading: boolean = false;
   @State private status: string = '等待配对';
   @State private scheduleStatus: string = '';
+  @State private recent: Delivery[] = [];
+  @State private lastReceiptAt: number = 0;
+  @State private reviewing: boolean = false;
   @State private selecting: boolean = false;
   @State private selection: SelectedMedia[] = [];
   @State private manualSending: boolean = false;
@@ -105,9 +112,11 @@ struct Index {
 
   private applyPairing(pairing: Pairing): void {
     this.pairing = pairing;
-    this.syncEnabled = pairing.enabled;
-    this.hasPairing = true;
+    this.hasPairing = pairing.pairedAfterMs !== undefined;
+    this.syncEnabled = this.hasPairing && pairing.enabled;
     this.activeHost = pairing.host;
+    this.mac = pairing.mac ?? new MacProfile();
+    this.reloadRecent();
     this.updateChat(pairing);
     if (pairing.pairedAfterMs !== undefined) {
       const date = new Date(pairing.pairedAfterMs);
@@ -115,6 +124,43 @@ struct Index {
     } else {
       this.cutoffLabel = '';
     }
+  }
+
+  private reloadRecent(): void {
+    const pairing = this.hasPairing ? this.pairing : undefined;
+    this.recent = pairing ? recentTransfers(this.getContext(), pairing) : [];
+    this.lastReceiptAt = pairing ? lastDelivery(this.getContext(), pairing, this.recent) : 0;
+  }
+
+  private confirmClearRecent(): void {
+    const paired = this.pairing;
+    if (!paired || !this.recent.length) { return; }
+    const visible = this.recent.slice();
+    this.getUIContext().showAlertDialog({
+      title: '清除最近传输记录？',
+      message: '清除本机上「' + macDisplayName(this.mac) + '」当前显示的传输记录和缩略图。手机与 Mac 上的原文件将保留。',
+      primaryButton: { value: '取消', action: () => {} },
+      secondaryButton: { value: '清除', action: () => {
+        if (this.pairing?.token !== paired.token) { return; }
+        if (!clearRecentTransfers(this.getContext(), paired, visible)) {
+          this.getUIContext().getPromptAction().showToast({ message: '未能清除全部记录，请重试。' });
+        }
+        this.reloadRecent();
+      } }
+    });
+  }
+
+  private deliveryTime(time: number): string {
+    const date = new Date(time);
+    const clock = date.getHours().toString().padStart(2, '0') + ':' + date.getMinutes().toString().padStart(2, '0');
+    return date.toLocaleDateString() === new Date().toLocaleDateString() ? clock : date.toLocaleDateString() + ' ' + clock;
+  }
+
+  private receiverDetails(): string {
+    const endpoint = `${this.activeHost}:${RECEIVER_PORT}`;
+    const family = familyName(this.mac.family);
+    return family !== 'Mac' && macDisplayName(this.mac).toLowerCase() !== family.toLowerCase() ?
+      `${family} · ${endpoint}` : endpoint;
   }
 
   private updateChat(pairing: Pairing | undefined): void {
@@ -142,12 +188,43 @@ struct Index {
       this.connect(false, saved);
       return;
     }
+    if (saved) {
+      this.reloadRecent();
+      this.refreshMac(saved);
+    }
     this.startListening();
     if (this.hasPairing) {
       this.refreshSchedule();
     }
     if (this.syncEnabled) {
       this.sync();
+    }
+  }
+
+  private async refreshMac(pairing: Pairing): Promise<void> {
+    let receiver: Receiver | undefined;
+    try {
+      receiver = new Receiver(pairing.host, pairing.token);
+      const mac = await receiver.verify();
+      if (!this.pageReady || this.changingSettings || this.pairing !== pairing) { return; }
+      this.macUnreachable = false;
+      if (pairing.mac?.name === mac.name && pairing.mac?.family === mac.family) {
+        return;
+      }
+      const current = loadPairing(this.getContext());
+      if (!current || current.revision !== pairing.revision || current.destination !== pairing.destination) {
+        return;
+      }
+      current.mac = mac;
+      savePairing(this.getContext(), current);
+      this.pairing = current;
+      this.mac = mac;
+    } catch (_error) {
+      if (this.pageReady && !this.changingSettings && this.pairing === pairing) {
+        this.macUnreachable = true;
+      }
+    } finally {
+      receiver?.close();
     }
   }
 
@@ -304,11 +381,11 @@ struct Index {
         return;
       }
       this.pairingStatus = '正在验证 Mac…';
-      const host = await findVerifiedHost(target.hosts, target.token);
+      const verified = await findVerifiedHost(target.hosts, target.token);
       if (!this.pageReady) {
         return;
       }
-      const pairing: Pairing = createPairing(context, host, target.token, Date.now(), this.pairing);
+      const pairing: Pairing = createPairing(context, verified.host, target.token, Date.now(), verified.mac, this.pairing);
       savePairing(context, pairing);
       Receiver.reportDevice(pairing.host, pairing.token, pairing.installation);
       this.stopListening();
@@ -318,7 +395,8 @@ struct Index {
         this.manualStatus = 'Mac 接收端已更改，请重新选择图片或视频';
       }
       this.applyPairing(pairing);
-      this.host = host;
+      this.macUnreachable = false;
+      this.host = verified.host;
       this.token = target.token;
       this.pairingStatus = '';
       this.showSettings = false;
@@ -352,6 +430,8 @@ struct Index {
       this.hasPairing = false;
       this.syncEnabled = false;
       this.activeHost = '';
+      this.recent = [];
+      this.lastReceiptAt = 0;
       this.updateChat(undefined);
       this.cutoffLabel = '';
       this.token = '';
@@ -439,6 +519,7 @@ struct Index {
         this.prepareBackgroundContinuation(cancellation);
       });
       if (this.activeSync === cancellation) {
+        if (result.uploaded > 0) { this.macUnreachable = false; }
         if (result.skipped > 0) {
           this.status = `本次同步 ${result.uploaded} 张，${result.skipped} 张暂未处理`;
         } else if (result.uploaded > 0) {
@@ -453,6 +534,7 @@ struct Index {
       }
     } finally {
       if (this.activeSync === cancellation) {
+        this.reloadRecent();
         this.activeSync = undefined;
         this.uploading = false;
         this.releaseBackgroundDelay();
@@ -468,6 +550,7 @@ struct Index {
   private clearSelection(): void {
     const selection: SelectedMedia[] = this.selection;
     this.selection = [];
+    this.reviewing = false;
     this.manualTarget = undefined;
     for (const item of selection) {
       item.thumbnail?.release().catch((): void => {});
@@ -493,6 +576,7 @@ struct Index {
         this.clearSelection();
         this.selection = picked;
         this.manualTarget = pairing;
+        this.reviewing = true;
       }
     } catch (_error) {
       this.manualStatus = '无法打开系统相册，请重试';
@@ -515,6 +599,7 @@ struct Index {
       if (this.activeManual !== cancellation) {
         return;
       }
+      this.reloadRecent();
       const completed = new Set(result.completed);
       this.selection = this.selection.filter((item: SelectedMedia): boolean => {
         if (!completed.has(item.uri)) {
@@ -525,6 +610,7 @@ struct Index {
       });
       if (this.selection.length === 0) {
         this.manualTarget = undefined;
+        this.reviewing = false;
         this.manualStatus = `已同步 ${completed.size} 项媒体`;
       } else if (cancellation.stopped) {
         this.manualStatus = `已取消本次发送，剩余 ${this.selection.length} 项可重试`;
@@ -541,18 +627,14 @@ struct Index {
   }
 
   @Builder
-  private pairingScanner() {
-    Button(this.hasPairing ? '扫码更换 Mac' : '扫一扫配对')
-      .width('100%')
-      .backgroundColor(this.hasPairing ? '#EAF0FF' : BLUE)
-      .fontColor(this.hasPairing ? INK : '#FFFFFF')
+  private scanButton() {
+    Button(this.hasPairing ? '扫码更换 Mac' : '扫码连接 Mac')
+      .width(this.hasPairing ? 'auto' : '100%').height(44)
+      .fontSize(this.hasPairing ? 14 : 16).fontWeight(FontWeight.Medium)
+      .backgroundColor(this.hasPairing ? '#33695A' : '#F0F8F1')
+      .fontColor(this.hasPairing ? '#FFFFFF' : '#153F33')
       .enabled(!this.changingSettings && !this.manualSending && !this.selecting)
       .onClick(() => { this.connect(true); })
-    if (this.pairingStatus.length > 0) {
-      Text(this.pairingStatus)
-        .fontSize(14)
-        .fontColor(INK)
-    }
   }
 
   @Builder
@@ -573,247 +655,233 @@ struct Index {
 
   @Builder
   private home() {
-    Scroll() {
-      Column({ space: 18 }) {
-        Column({ space: 7 }) {
-          Text() {
-            Span($r('app.string.app_name'))
-              .fontSize(34)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(INK)
-            Span(this.version)
-              .fontSize(15)
-              .fontColor(MUTED)
-          }
-          Text($r('app.string.module_description'))
-            .fontSize(15)
-            .fontColor(MUTED)
-        }
-        .alignItems(HorizontalAlign.Start)
-        .width('100%')
-        .margin({ top: 18, bottom: 4 })
-
-        Column({ space: 9 }) {
-          Text(!this.hasPairing ? '尚未连接 Mac' : !this.syncEnabled ? '自动同步已暂停' :
-            this.galleryGranted ? '自动同步已开启' : '等待相册授权')
-            .fontSize(20)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(INK)
-          Text(this.status)
-            .fontSize(15)
-            .fontColor(MUTED)
-          if (this.hasPairing) {
-            Text(`Mac · ${this.activeHost}:${RECEIVER_PORT}`)
-              .fontSize(14)
-              .fontColor(MUTED)
-            if (!this.showSettings) {
-              this.pairingScanner()
-            }
-            if (this.cutoffLabel.length > 0) {
-              Text(`自动同步起点 · ${this.cutoffLabel}`)
-                .fontSize(14)
-                .fontColor(MUTED)
-            }
-          }
-          if (this.scheduleStatus.length > 0) {
-            Text(this.scheduleStatus)
-              .fontSize(14)
-              .fontColor(MUTED)
-          }
-          if (this.syncEnabled && !this.galleryGranted) {
-            Button('允许访问相册')
-              .backgroundColor(BLUE)
-              .enabled(!this.changingSettings)
-              .onClick(() => { this.grantGalleryAccess(); })
-          }
-          if (this.syncEnabled) {
-            Button('暂停自动同步')
-              .backgroundColor('#EAF0FF')
-              .fontColor(INK)
-              .enabled(!this.changingSettings)
-              .onClick(() => { this.setSyncEnabled(false); })
-          } else if (this.hasPairing) {
-            Button('继续自动同步')
-              .backgroundColor(BLUE)
-              .enabled(!this.changingSettings)
-              .onClick(() => { this.setSyncEnabled(true); })
-          }
-        }
-        .alignItems(HorizontalAlign.Start)
-        .width('100%')
-        .padding(20)
-        .backgroundColor('#FFFFFF')
-        .borderRadius(22)
-
-        if (this.chat) {
-          ChatEntry({ session: this.chat, open: () => {
-            if (this.pathStack.size() === 0) { this.pathStack.pushPath({ name: CHAT_ROUTE }); }
-          } })
-        }
+    Column() {
+      Row({ space: 5 }) {
+        Text($r('app.string.app_name')).fontSize(32).fontWeight(FontWeight.Bold).fontColor($r('app.color.ink'))
+        Text(this.version.trim()).fontSize(13).fontColor($r('app.color.secondary_text'))
+        Blank().layoutWeight(1)
         if (this.hasPairing) {
-          Button(this.selecting ? '正在选择媒体…' : '手动选图或视频')
-            .width('100%')
-            .backgroundColor(BLUE)
+          Button('设置').fontSize(14).height(44).fontColor($r('app.color.ink')).backgroundColor($r('app.color.soft'))
+            .enabled(!this.changingSettings && !this.manualSending && !this.selecting)
+            .onClick(() => { this.showSettings = true; })
+        }
+      }.width('100%').constraintSize({ maxWidth: 540 }).padding({ left: 18, right: 18, top: 8, bottom: 7 })
+
+      Scroll() {
+        Column({ space: 16 }) {
+          if (this.hasPairing) {
+            this.pairedDevice()
+          } else {
+            this.firstConnection()
+          }
+          if (this.pairingStatus) {
+            Text(this.pairingStatus).fontSize(14).fontColor($r('app.color.secondary_text')).width('100%')
+          }
+          if (this.hasPairing) {
+            if (this.syncEnabled && !this.galleryGranted) {
+              Row({ space: 10 }) {
+                Text('自动同步需要相册权限').fontSize(14).fontColor($r('app.color.ink')).layoutWeight(1)
+                Button('允许访问相册').height(44).fontSize(14).fontColor($r('app.color.accent_text'))
+                  .backgroundColor($r('app.color.soft')).enabled(!this.changingSettings)
+                  .onClick(() => { this.grantGalleryAccess(); })
+              }.width('100%')
+            }
+            if (this.status && !['Mac 已连接', '等待相册授权', '允许访问相册后可自动同步', '等待同步', '等待新截图', '同步已停止'].includes(this.status) &&
+              !this.status.startsWith('已同步 ')) {
+              Text(this.status).fontSize(14).fontColor($r('app.color.secondary_text')).width('100%')
+            }
+            if (this.chat) {
+              ChatEntry({ session: this.chat, open: () => {
+                if (this.pathStack.size() === 0) { this.pathStack.pushPath({ name: CHAT_ROUTE }); }
+              } })
+            }
+            this.historyRows()
+          }
+        }.alignItems(HorizontalAlign.Start).width('100%').constraintSize({ maxWidth: 540 })
+        .padding({ left: 18, right: 18, top: 8, bottom: 20 })
+      }.layoutWeight(1).align(Alignment.Top).width('100%').scrollBar(BarState.Auto)
+
+      if (this.hasPairing) {
+        Column({ space: 5 }) {
+          if (this.manualStatus && !this.reviewing) {
+            Text(this.manualStatus).fontSize(13).fontColor($r('app.color.secondary_text'))
+          }
+          Button(this.selecting ? '正在选择' : '手动发送').width('100%').height(48)
+            .fontColor(Color.White).backgroundColor(PINE)
             .enabled(!this.manualSending && !this.selecting && !this.changingSettings)
             .onClick(() => { this.pickMedia(); })
-
-          if (this.selection.length > 0) {
-            Column({ space: 10 }) {
-              Text('确认发送')
-                .fontSize(20)
-                .fontWeight(FontWeight.Bold)
-                .fontColor(INK)
-              Text(`将 ${this.selection.length} 项媒体发送到 Mac · ${this.activeHost}:${RECEIVER_PORT}`)
-                .fontSize(14)
-                .fontColor(MUTED)
-              Scroll() {
-                Row({ space: 8 }) {
-                  ForEach(this.selection, (item: SelectedMedia) => {
-                    Stack({ alignContent: Alignment.BottomEnd }) {
-                      if (item.thumbnail) {
-                        Image(item.thumbnail)
-                          .objectFit(ImageFit.Cover)
-                          .width(76)
-                          .height(76)
-                          .borderRadius(8)
-                          .accessibilityText(item.name || (item.isVideo ? '选中的视频' : '选中的图片'))
-                        if (item.isVideo) {
-                          Text('视频')
-                            .fontSize(10)
-                            .fontColor('#FFFFFF')
-                            .backgroundColor(INK)
-                            .padding({ left: 4, right: 4, top: 2, bottom: 2 })
-                            .borderRadius(4)
-                            .margin(4)
-                        }
-                      } else {
-                        Text(item.name || (item.isVideo ? '选中的视频' : '选中的图片'))
-                          .fontSize(11)
-                          .fontColor(MUTED)
-                          .textAlign(TextAlign.Center)
-                          .maxLines(3)
-                          .width(76)
-                          .height(76)
-                          .backgroundColor('#EAF0FF')
-                          .borderRadius(8)
-                      }
-                    }
-                  }, (item: SelectedMedia): string => item.uri)
-                }
-              }
-              .scrollable(ScrollDirection.Horizontal)
-              .scrollBar(BarState.Auto)
-              if (this.manualSending) {
-                Button('取消本次发送')
-                  .backgroundColor('#EAF0FF')
-                  .fontColor(INK)
-                  .onClick(() => { this.activeManual?.stop(); })
-              } else {
-                Row({ space: 8 }) {
-                  Button(`发送 ${this.selection.length} 项`)
-                    .backgroundColor(BLUE)
-                    .enabled(!this.changingSettings && !this.selecting)
-                    .onClick(() => { this.sendMedia(); })
-                  Button('返回')
-                    .backgroundColor('#EAF0FF')
-                    .fontColor(INK)
-                    .enabled(!this.selecting)
-                    .onClick(() => { this.clearSelection(); this.manualStatus = ''; })
-                }
-              }
-            }
-            .alignItems(HorizontalAlign.Start)
-            .width('100%')
-            .padding(20)
-            .backgroundColor('#FFFFFF')
-            .borderRadius(22)
+        }.width('100%').constraintSize({ maxWidth: 540 }).padding({ left: 16, right: 16, top: 8, bottom: 12 })
+        .backgroundBlurStyle(BlurStyle.Thin).backgroundColor($r('app.color.dock'))
+        .bindSheet(this.reviewing, this.confirmSheet(), {
+          height: SheetSize.FIT_CONTENT, onWillDismiss: (action: DismissSheetAction) => {
+            if (!this.manualSending) { action.dismiss(); }
+          }, onDisappear: () => {
+            if (this.reviewing && !this.manualSending) { this.clearSelection(); this.manualStatus = ''; }
           }
-          if (this.manualStatus.length > 0) {
-            Text(this.manualStatus)
-              .fontSize(14)
-              .fontColor(MUTED)
-              .width('100%')
-          }
-          Button(this.showSettings ? '收起连接设置' : '连接设置')
-            .backgroundColor('#EAF0FF')
-            .fontColor(INK)
-            .enabled(!this.manualSending && !this.selecting && !this.changingSettings)
-            .onClick(() => { this.showSettings = !this.showSettings; })
-        }
-
-        if (!this.hasPairing || this.showSettings) {
-          Column({ space: 12 }) {
-            Text(this.hasPairing ? '连接设置' : '连接 Mac')
-              .fontSize(20)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(INK)
-            Text('在 Mac 上点「扫码配对」显示二维码。')
-              .fontSize(14)
-              .fontColor(MUTED)
-            this.pairingScanner()
-            Text('也可以手动输入 Mac 上显示的地址和配对码。')
-              .fontSize(14)
-              .fontColor(MUTED)
-            Text('Mac 局域网地址')
-              .fontSize(14)
-              .fontColor(INK)
-            TextInput({ text: this.host, placeholder: '192.168.1.20:43871' })
-              .id(HOST_INPUT_ID)
-              .type(InputType.Normal)
-              .width('100%')
-              .backgroundColor('#F3F6FC')
-              .fontColor(INK)
-              .maxLength(21)
-              .enabled(!this.changingSettings)
-              .onChange((value: string) => { this.host = value; })
-            Text('配对码')
-              .fontSize(14)
-              .fontColor(INK)
-            TextInput({ text: this.token, placeholder: '24 位配对码' })
-              .id(TOKEN_INPUT_ID)
-              .type(InputType.Password)
-              .width('100%')
-              .backgroundColor('#F3F6FC')
-              .fontColor(INK)
-              .maxLength(24)
-              .enabled(!this.changingSettings)
-              .onChange((value: string) => { this.token = value; })
-            Button(this.hasPairing ? '验证并保存' : '连接 Mac')
-              .width('100%')
-              .backgroundColor('#EAF0FF')
-              .fontColor(INK)
-              .fontSize(16)
-              .fontWeight(FontWeight.Medium)
-              .enabled(!this.changingSettings && !this.manualSending && !this.selecting)
-              .onClick(() => { this.connect(); })
-            if (this.hasPairing) {
-              Button('断开 Mac')
-                .backgroundColor('#EAF0FF')
-                .fontColor(INK)
-                .enabled(!this.changingSettings && !this.manualSending && !this.selecting)
-                .onClick(() => { this.disconnect(); })
-            }
-          }
-          .alignItems(HorizontalAlign.Start)
-          .width('100%')
-          .padding(20)
-          .backgroundColor('#FFFFFF')
-          .borderRadius(22)
-        }
-
-        Text('请在可信的 Wi-Fi 下使用。截图与配对码通过局域网 HTTP 传输。')
-          .fontSize(13)
-          .fontColor(MUTED)
-          .width('100%')
+        })
       }
-      .width('100%')
-      .constraintSize({ maxWidth: 520 })
-      .padding({ left: 20, right: 20, bottom: 28 })
-    }
-    .align(Alignment.Top)
-    .width('100%')
-    .height('100%')
-    .backgroundColor('#F3F6FC')
-    .scrollBar(BarState.Off)
+    }.height('100%').width('100%').backgroundColor($r('app.color.window_background'))
+    .bindSheet(this.showSettings, this.settingsSheet(), {
+      height: SheetSize.LARGE, onDisappear: () => { this.showSettings = false; }
+    })
+  }
+
+  @Builder
+  private firstConnection() {
+    Column({ space: 12 }) {
+      Text('尚未配对').fontColor(MIST).fontSize(13)
+      Image($r('app.media.pairing_display')).height(90).width('100%').objectFit(ImageFit.Contain).accessibilityLevel('no')
+      Text('连接你的 Mac').fontSize(26).fontWeight(FontWeight.Bold).fontColor(Color.White)
+      Text('配对后，新截的图会自动传到 Mac。').fontSize(14).fontColor(MIST)
+      this.scanButton()
+    }.alignItems(HorizontalAlign.Start).width('100%').padding(20).borderRadius(22)
+    .linearGradient({ angle: 140, colors: [['#34695B', 0], ['#143E33', 1]] })
+    Button('手动输入地址和配对码').fontColor($r('app.color.accent_text')).backgroundColor(Color.Transparent)
+      .width('100%').height(44).onClick(() => { this.showSettings = true; })
+    Text('在 Mac 上打开配对码').fontSize(18).fontWeight(FontWeight.Medium).fontColor($r('app.color.ink'))
+    Text('手机和 Mac 接入同一局域网后，在 Mac 端即图右上角点「扫码配对」。')
+      .fontSize(15).fontColor($r('app.color.secondary_text'))
+  }
+
+  @Builder
+  private pairedDevice() {
+    Column({ space: 10 }) {
+      Row() {
+        Column({ space: 4 }) {
+          Text('已配对设备 · ' + familyName(this.mac.family)).fontSize(13).fontColor(MIST)
+          Text(macDisplayName(this.mac)).fontSize(22).fontWeight(FontWeight.Bold).fontColor(Color.White)
+          Text(this.macUnreachable ? '上次连接检查失败' : this.lastReceiptAt ? '上次成功传输 ' + this.deliveryTime(this.lastReceiptAt) : '暂无送达记录')
+            .fontSize(13).fontColor(MIST)
+        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        Image(macArtwork(this.mac.family)).width(92).height(62).objectFit(ImageFit.Contain)
+          .accessibilityLevel('no')
+      }.width('100%')
+      this.scanButton()
+      Divider().color('#598476')
+      Row({ space: 7 }) {
+        Circle().width(8).height(8).fill(this.syncEnabled ? '#8FE2AA' : '#FF9B91')
+        Text(this.syncEnabled ? '自动同步已开启' : '自动同步已暂停')
+          .fontColor(Color.White).fontSize(15).fontWeight(FontWeight.Medium).layoutWeight(1)
+        Button(this.syncEnabled ? '暂停' : '继续').fontSize(14).height(44).fontColor(Color.White)
+          .backgroundColor('#33695A').enabled(!this.changingSettings)
+          .onClick(() => { this.setSyncEnabled(!this.syncEnabled); })
+      }.width('100%')
+    }.alignItems(HorizontalAlign.Start).width('100%').padding(18).borderRadius(22)
+    .linearGradient({ angle: 140, colors: [['#34695B', 0], ['#143E33', 1]] })
+  }
+
+  @Builder
+  private historyRows() {
+    Column({ space: 6 }) {
+      Row({ space: 8 }) {
+        Text('最近传输').fontSize(20).fontColor($r('app.color.ink')).fontWeight(FontWeight.Bold)
+          .layoutWeight(1)
+        if (this.recent.length) {
+          Button('清除记录').fontSize(14).height(44)
+            .fontColor($r('app.color.accent_text')).backgroundColor($r('app.color.soft'))
+            .onClick(() => { this.confirmClearRecent(); })
+        }
+      }.width('100%')
+      if (!this.recent.length) {
+        Text('Mac 收到图片或视频后，会在这里显示。').fontSize(14).fontColor($r('app.color.secondary_text'))
+          .padding({ top: 6, bottom: 6 })
+      }
+      ForEach(this.recent, (item: Delivery) => {
+        Row({ space: 10 }) {
+          if (item.thumbnail) {
+            Image(item.thumbnail).width(44).height(50).objectFit(ImageFit.Cover).borderRadius(8).accessibilityLevel('no')
+          } else {
+            Text(item.video ? '视频' : '图片').fontSize(12).fontColor($r('app.color.accent_text'))
+              .width(44).height(50).textAlign(TextAlign.Center).backgroundColor($r('app.color.soft')).borderRadius(8)
+          }
+          Column({ space: 4 }) {
+            Text(item.name).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+              .fontSize(15).fontColor($r('app.color.ink')).fontWeight(FontWeight.Medium)
+            Text((item.manual ? '手动发送' : '自动同步') + ' · ' + chatSize(item.bytes))
+              .fontSize(12).fontColor($r('app.color.secondary_text'))
+          }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+          Column({ space: 4 }) {
+            Text(this.deliveryTime(item.time)).fontSize(12).fontColor($r('app.color.secondary_text'))
+            Text('已送达').fontSize(12).fontColor($r('app.color.accent_text'))
+          }.alignItems(HorizontalAlign.End)
+        }.width('100%').padding({ top: 7, bottom: 7 })
+        Divider().color($r('app.color.line'))
+      }, (item: Delivery): string => item.id)
+    }.width('100%').alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  private settingsSheet() {
+    Scroll() {
+      Column({ space: 12 }) {
+        Text(this.hasPairing ? '连接与同步' : '手动连接 Mac').fontSize(22).fontWeight(FontWeight.Bold).fontColor($r('app.color.ink'))
+        if (this.hasPairing) {
+          Text(macDisplayName(this.mac) + ' · ' + this.receiverDetails()).fontColor($r('app.color.secondary_text'))
+          if (this.cutoffLabel) {
+            Text('仅自动发送 ' + this.cutoffLabel + ' 配对后截取的新图。').fontSize(14).fontColor($r('app.color.secondary_text'))
+          }
+          if (this.scheduleStatus) {
+            Text(this.scheduleStatus).fontSize(14).fontColor($r('app.color.secondary_text'))
+          }
+        }
+        Text('Mac 局域网地址').fontColor($r('app.color.ink'))
+        TextInput({ text: this.host, placeholder: '192.168.1.20:43871' })
+          .id(HOST_INPUT_ID).maxLength(21).enabled(!this.changingSettings)
+          .fontColor($r('app.color.ink')).backgroundColor($r('app.color.soft'))
+          .onChange((value: string) => { this.host = value; })
+        Text('配对码').fontColor($r('app.color.ink'))
+        TextInput({ text: this.token, placeholder: '24 位配对码' }).type(InputType.Password)
+          .id(TOKEN_INPUT_ID).maxLength(24).enabled(!this.changingSettings)
+          .fontColor($r('app.color.ink')).backgroundColor($r('app.color.soft'))
+          .onChange((value: string) => { this.token = value; })
+        Button(this.changingSettings ? '正在验证' : '连接 Mac').width('100%').height(46)
+          .backgroundColor(PINE).fontColor(Color.White).enabled(!this.changingSettings)
+          .onClick(() => { this.connect(); })
+        if (this.pairingStatus) {
+          Text(this.pairingStatus).fontSize(14).fontColor($r('app.color.secondary_text'))
+        }
+        if (this.hasPairing) {
+          Button('断开 Mac').fontColor($r('app.color.warning')).backgroundColor(Color.Transparent)
+            .enabled(!this.changingSettings).onClick(() => { this.disconnect(); })
+        }
+        Button('关闭').fontColor($r('app.color.accent_text')).backgroundColor($r('app.color.soft'))
+          .onClick(() => { this.showSettings = false; })
+      }.alignItems(HorizontalAlign.Start).width('100%').padding(22)
+    }.backgroundColor($r('app.color.surface')).width('100%')
+  }
+
+  @Builder
+  private confirmSheet() {
+    Column({ space: 12 }) {
+      Text('确认发送').fontSize(22).fontWeight(FontWeight.Bold).fontColor($r('app.color.ink'))
+      Text('发送到 ' + macDisplayName(this.mac)).fontSize(16).fontColor($r('app.color.ink'))
+      Scroll() {
+        Row({ space: 8 }) {
+          ForEach(this.selection, (item: SelectedMedia) => {
+            Column({ space: 2 }) {
+              if (item.thumbnail) {
+                Image(item.thumbnail).width(70).height(70).borderRadius(8).objectFit(ImageFit.Cover).accessibilityText(item.name)
+              } else {
+                Text(item.name || (item.isVideo ? '视频' : '图片')).fontSize(12).width(70).height(70)
+                  .maxLines(3).textOverflow({ overflow: TextOverflow.Ellipsis }).fontColor($r('app.color.secondary_text'))
+              }
+              Text(item.isVideo ? '视频' : '照片').fontSize(12).fontColor($r('app.color.secondary_text'))
+            }
+          }, (item: SelectedMedia): string => item.uri)
+        }
+      }.width('100%').scrollable(ScrollDirection.Horizontal)
+      if (this.manualStatus) {
+        Text(this.manualStatus).fontSize(14).fontColor($r('app.color.secondary_text'))
+      }
+      if (this.manualSending) {
+        Button('取消本次发送').fontColor($r('app.color.accent_text')).backgroundColor($r('app.color.soft'))
+          .onClick(() => { this.activeManual?.stop(); })
+      } else {
+        Button('发送 ' + this.selection.length + ' 项').width('100%').height(46).backgroundColor(PINE).fontColor(Color.White)
+          .enabled(this.selection.length > 0).onClick(() => { this.sendMedia(); })
+        Button('返回').fontColor($r('app.color.accent_text')).backgroundColor(Color.Transparent)
+          .onClick(() => { this.clearSelection(); this.manualStatus = ''; })
+      }
+    }.width('100%').alignItems(HorizontalAlign.Start).padding(20).backgroundColor($r('app.color.surface'))
   }
 }

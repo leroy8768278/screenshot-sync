@@ -121,6 +121,7 @@ final class SelectedVideo: Transferable, Sendable {
     static let maxBytes = 512 * 1024 * 1024
 
     let file: URL
+    let byteCount: Int
     let mimeType: String
     let fileExtension: String
 
@@ -144,6 +145,7 @@ final class SelectedVideo: Transferable, Sendable {
         default: throw SyncIssue.unsupportedVideo
         }
 
+        byteCount = size
         fileExtension = ext
         let temporaryFile = FileManager.default.temporaryDirectory
             .appending(path: "SelectedVideo-\(UUID()).\(ext)", directoryHint: .notDirectory)
@@ -285,6 +287,12 @@ private final class ScreenshotTransferTime {
 final class PhotoSync: ObservableObject {
     static let shared = PhotoSync()
 
+    struct ManualUploadProgress: Sendable {
+        let item: Int
+        var sent: Int64 = 0
+        var total: Int64? = nil
+    }
+
     struct ManualResult {
         var remaining: [PhotosPickerItem]
         var sent = 0
@@ -297,6 +305,7 @@ final class PhotoSync: ObservableObject {
     @Published private(set) var working = false
     @Published private(set) var sendingManually = false
     @Published private(set) var sentCount = 0
+    @Published private(set) var recent: [TransferReceipt] = []
     @Published private(set) var lastSent: Date?
     @Published private(set) var errorMessage: String?
 
@@ -343,10 +352,7 @@ final class PhotoSync: ObservableObject {
     }
 
     func connect(_ candidate: Receiver) async throws {
-        try await connect {
-            try await ReceiverClient.check(candidate)
-            return candidate
-        }
+        try await connect { try await ReceiverClient.check(candidate) }
     }
 
     func connect(scannedCode: String) async throws {
@@ -373,6 +379,7 @@ final class PhotoSync: ObservableObject {
             verified.automatic = receiver.automatic
             if receiver.code == candidate.code {
                 verified.pairedAt = receiver.pairedAt ?? connectedAt
+                verified.macProfile = candidate.macProfile ?? receiver.macProfile
             }
         }
         let history = try SyncHistory(key: verified.historyKey)
@@ -503,7 +510,9 @@ final class PhotoSync: ObservableObject {
     private func checkAutomationDestination(_ destination: Receiver) throws {
         try Task.checkCancellation()
         guard !changingReceiver, !sendingManually else { throw SyncIssue.syncBusy }
-        guard receiver == destination else { throw SyncIssue.receiverChanged }
+        guard let receiver, receiver.isSamePairing(as: destination), receiver.automatic else {
+            throw SyncIssue.receiverChanged
+        }
         guard history != nil else { throw SyncIssue.storage }
         updatePhotoAccess(PHPhotoLibrary.authorizationStatus(for: .readWrite))
         guard permission == .authorized else {
@@ -544,7 +553,8 @@ final class PhotoSync: ObservableObject {
     }
 
     func sendSelection(
-        _ items: [PhotosPickerItem], to destination: Receiver, onProgress: (Int) -> Void
+        _ items: [PhotosPickerItem], to destination: Receiver,
+        onProgress: @escaping @MainActor @Sendable (ManualUploadProgress) -> Void
     ) async -> ManualResult {
         guard let receiver, receiver.code == destination.code, receiver.displayAddress == destination.displayAddress,
               destination.pairedAt == nil || destination.pairedAt == receiver.pairedAt else {
@@ -574,6 +584,11 @@ final class PhotoSync: ObservableObject {
         }
 
         for (index, item) in items.enumerated() {
+            let ordinal = index + 1
+            let report: ReceiverClient.UploadProgress = { sent, total in
+                onProgress(ManualUploadProgress(item: ordinal, sent: sent, total: total))
+            }
+            onProgress(ManualUploadProgress(item: ordinal))
             do {
                 try Task.checkCancellation()
                 let assetID = item.itemIdentifier.map(Self.uploadID)
@@ -591,8 +606,8 @@ final class PhotoSync: ObservableObject {
                     } else {
                         let name = Self.uploadFilename(id: id, timestamp: .now, extension: video.fileExtension)
                         try Task.checkCancellation()
-                        try await ReceiverClient.send(video, named: name, id: id, to: verified)
-                        try recordDelivery(id, to: verified)
+                        try await ReceiverClient.send(video, named: name, id: id, to: verified, onProgress: report)
+                        try recordDelivery(.init(id: id, kind: .video, delivered: .now, bytes: video.byteCount, thumbnail: nil), to: verified)
                         result.sent += 1
                     }
                 } else {
@@ -603,7 +618,7 @@ final class PhotoSync: ObservableObject {
                     if history?.sent.contains(id) == true {
                         result.alreadySent += 1
                     } else {
-                        try await upload(image, id: id, timestamp: .now, to: verified)
+                        try await upload(image, id: id, timestamp: .now, kind: .photo, to: verified, onProgress: report)
                         result.sent += 1
                     }
                 }
@@ -616,17 +631,15 @@ final class PhotoSync: ObservableObject {
                 result.remaining.append(item)
                 if result.message == nil { result.message = error.localizedDescription }
             }
-            onProgress(index + 1)
         }
         return result
     }
 
     private func verifyLegacyPairing(_ current: Receiver) async throws -> Receiver {
         if current.pairedAt != nil { return current }
-        try await ReceiverClient.check(current)
+        var verified = try await ReceiverClient.check(current)
         try Task.checkCancellation()
         guard receiver == current else { throw SyncIssue.receiverChanged }
-        var verified = current
         verified.pairedAt = .now
         try ReceiverStore.save(verified)
         receiver = verified
@@ -638,8 +651,18 @@ final class PhotoSync: ObservableObject {
         registration?.cancel()
         registration = Task {
             do {
-                if verifyAddress { try await ReceiverClient.check(receiver) }
+                if verifyAddress {
+                    let checked = try await ReceiverClient.check(receiver)
+                    try Task.checkCancellation()
+                    guard var active = self.receiver, active.isSamePairing(as: receiver) else { return }
+                    if active.macProfile != checked.macProfile {
+                        active.macProfile = checked.macProfile
+                        try ReceiverStore.save(active)
+                        self.receiver = active
+                    }
+                }
                 try await ReceiverClient.registerDevice(with: receiver)
+                if !Task.isCancelled, self.receiver?.macProfile == nil { registration = nil }
             } catch {
                 // A replaced pairing owns a new task. Only this pairing may schedule a retry.
                 if !Task.isCancelled { registration = nil }
@@ -661,11 +684,21 @@ final class PhotoSync: ObservableObject {
         _ = await operation?.value
     }
 
-    private func upload(_ image: ScreenshotData, id: String, timestamp: Date, to receiver: Receiver) async throws {
+    private func upload(_ image: ScreenshotData, id: String, timestamp: Date, kind: TransferReceipt.Kind,
+                        to receiver: Receiver, onProgress: ReceiverClient.UploadProgress? = nil) async throws {
         try Task.checkCancellation()
         let filename = Self.uploadFilename(id: id, timestamp: timestamp, extension: image.fileExtension)
-        try await ReceiverClient.send(image, named: filename, id: id, to: receiver)
-        try recordDelivery(id, to: receiver)
+        try await ReceiverClient.send(image, named: filename, id: id, to: receiver, onProgress: onProgress)
+        let thumbnail = await Task.detached(priority: .utility) {
+            guard let source = CGImageSourceCreateWithData(image.bytes as CFData, nil),
+                  let small = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                      kCGImageSourceCreateThumbnailFromImageAlways: true,
+                      kCGImageSourceCreateThumbnailWithTransform: true,
+                      kCGImageSourceThumbnailMaxPixelSize: 112
+                  ] as CFDictionary) else { return nil as Data? }
+            return UIImage(cgImage: small).jpegData(compressionQuality: 0.72)
+        }.value
+        try recordDelivery(.init(id: id, kind: kind, delivered: .now, captured: kind == .screenshot ? timestamp : nil, bytes: image.bytes.count, thumbnail: thumbnail), to: receiver)
     }
 
     private static func uploadFilename(id: String, timestamp: Date, extension suffix: String) -> String {
@@ -673,9 +706,9 @@ final class PhotoSync: ObservableObject {
         return "iOS-\(timestamp)-\(id.suffix(8)).\(suffix)"
     }
 
-    private func recordDelivery(_ id: String, to receiver: Receiver) throws {
+    private func recordDelivery(_ receipt: TransferReceipt, to receiver: Receiver) throws {
         guard self.receiver?.code == receiver.code, var history else { throw SyncIssue.receiverChanged }
-        try history.markSent(id)
+        try history.markSent(receipt)
         self.history = history
         updateStats()
     }
@@ -734,7 +767,7 @@ final class PhotoSync: ObservableObject {
 
             do {
                 let image = try await ScreenshotData.load(asset)
-                try await upload(image, id: id, timestamp: capturedAt, to: verified)
+                try await upload(image, id: id, timestamp: capturedAt, kind: .screenshot, to: verified)
             } catch let issue as SyncIssue {
                 if Task.isCancelled { return false }
                 errorMessage = issue.localizedDescription
@@ -772,8 +805,20 @@ final class PhotoSync: ObservableObject {
         return PHAsset.fetchAssets(with: .image, options: options)
     }
 
+    func clearRecent(ids: Set<String>, for destination: Receiver) {
+        guard receiver?.historyKey == destination.historyKey, !changingReceiver, var history else { return }
+        do {
+            try history.clearRecent(ids: ids)
+            self.history = history
+            updateStats()
+        } catch {
+            errorMessage = "清除最近传输记录失败，请重试。"
+        }
+    }
+
     private func updateStats() {
         sentCount = history?.sent.count ?? 0
+        recent = history?.recent ?? []
         lastSent = history?.lastSent
     }
 

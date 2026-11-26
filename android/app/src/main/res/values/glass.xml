@@ -1,0 +1,11 @@
+<resources>
+    <color name="glass_paper">#F7F9F5</color>
+    <color name="glass_ink">#172E27</color>
+    <color name="glass_muted">#51665D</color>
+    <color name="glass_outline">#D9E3D9</color>
+    <color name="glass_panel">#FDFEFA</color>
+    <color name="glass_tint">#E8F1E9</color>
+    <color name="glass_accent">#145C49</color>
+    <color name="glass_primary">#155A49</color>
+    <color name="glass_error">#9F3027</color>
+</resources>
