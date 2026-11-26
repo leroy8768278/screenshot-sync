@@ -9,14 +9,15 @@ import { scanPairing } from '../sync/ScanPairing';
 import { GALLERY_PERMISSION, galleryAllowed, syncScreenshots, SyncCancellation, SyncResult } from '../sync/ScreenshotSync';
 import { updateSchedule } from '../work/Schedule';
 
-import { CHAT_INPUT_ID, ChatCard } from './ChatCard';
+import { ChatSession } from '../sync/ChatSession';
+import { ChatEntry, ChatPage } from './ChatPage';
 
 const BLUE: string = '#2359D7';
 const INK: string = '#162444';
 const MUTED: string = '#475975';
 const HOST_INPUT_ID: string = 'receiver-host-input';
 const TOKEN_INPUT_ID: string = 'receiver-token-input';
-const DISMISS_CHAT_KEYBOARD: string = 'dismiss-chat-keyboard';
+const CHAT_ROUTE: string = 'conversation';
 
 function versionLabel(): string {
   try {
@@ -30,14 +31,14 @@ function versionLabel(): string {
 @Entry
 @Component
 struct Index {
-  private readonly chatEditor: TextAreaController = new TextAreaController();
+  private readonly pathStack: NavPathStack = new NavPathStack();
   @StorageProp('syncForeground') @Watch('foregroundChanged') private foreground: boolean = false;
   @State private host: string = '';
   @State private token: string = '';
   @State private syncEnabled: boolean = false;
   @State private hasPairing: boolean = false;
   @State private activeHost: string = '';
-  @State private chatRoom: string = '';
+  @State private chat: ChatSession | undefined = undefined;
   @State private cutoffLabel: string = '';
   @State private showSettings: boolean = false;
   @State private galleryGranted: boolean = false;
@@ -94,6 +95,7 @@ struct Index {
 
   aboutToDisappear(): void {
     this.pageReady = false;
+    this.chat?.close();
     this.stopListening();
     this.activeManual?.stop();
     this.activeManual = undefined;
@@ -106,7 +108,7 @@ struct Index {
     this.syncEnabled = pairing.enabled;
     this.hasPairing = true;
     this.activeHost = pairing.host;
-    this.chatRoom = pairing.pairedAfterMs !== undefined ? pairing.destination + ':' + pairing.host : '';
+    this.updateChat(pairing);
     if (pairing.pairedAfterMs !== undefined) {
       const date = new Date(pairing.pairedAfterMs);
       this.cutoffLabel = date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
@@ -115,10 +117,20 @@ struct Index {
     }
   }
 
+  private updateChat(pairing: Pairing | undefined): void {
+    const room = pairing && pairing.pairedAfterMs !== undefined ? pairing.destination + ':' + pairing.host : undefined;
+    if (this.chat?.room === room) { return; }
+    this.pathStack.clear();
+    this.chat?.close();
+    this.chat = room ? new ChatSession(this.getContext(), room) : undefined;
+    this.chat?.setForeground(this.foreground);
+  }
+
   private foregroundChanged(): void {
     if (!this.pageReady) {
       return;
     }
+    this.chat?.setForeground(this.foreground);
     if (!this.foreground) {
       // Keep the observer available for notifications delivered before the process is suspended.
       this.stopForegroundPolling();
@@ -340,7 +352,7 @@ struct Index {
       this.hasPairing = false;
       this.syncEnabled = false;
       this.activeHost = '';
-      this.chatRoom = '';
+      this.updateChat(undefined);
       this.cutoffLabel = '';
       this.token = '';
       this.showSettings = false;
@@ -543,7 +555,24 @@ struct Index {
     }
   }
 
+  @Builder
+  private destination(name: string) {
+    if (name === CHAT_ROUTE && this.chat) {
+      ChatPage({ session: this.chat })
+    }
+  }
+
   build() {
+    Navigation(this.pathStack) {
+      this.home()
+    }
+    .mode(NavigationMode.Stack)
+    .hideTitleBar(true)
+    .navDestination(this.destination)
+  }
+
+  @Builder
+  private home() {
     Scroll() {
       Column({ space: 18 }) {
         Column({ space: 7 }) {
@@ -616,8 +645,10 @@ struct Index {
         .backgroundColor('#FFFFFF')
         .borderRadius(22)
 
-        if (this.chatRoom.length > 0) {
-          ChatCard({ room: this.chatRoom, editor: this.chatEditor })
+        if (this.chat) {
+          ChatEntry({ session: this.chat, open: () => {
+            if (this.pathStack.size() === 0) { this.pathStack.pushPath({ name: CHAT_ROUTE }); }
+          } })
         }
         if (this.hasPairing) {
           Button(this.selecting ? '正在选择媒体…' : '手动选图或视频')
@@ -784,17 +815,5 @@ struct Index {
     .height('100%')
     .backgroundColor('#F3F6FC')
     .scrollBar(BarState.Off)
-    .parallelGesture(TapGesture().tag(DISMISS_CHAT_KEYBOARD).onAction(() => {
-      this.chatEditor.stopEditing();
-    }))
-    .onTouchTestDone((_event: BaseGestureEvent, recognizers: GestureRecognizer[]) => {
-      const editingField = recognizers.some((r: GestureRecognizer): boolean => {
-        const id = r.getEventTargetInfo().getId();
-        return id === CHAT_INPUT_ID || id === HOST_INPUT_ID || id === TOKEN_INPUT_ID;
-      });
-      if (editingField) {
-        recognizers.find((r: GestureRecognizer): boolean => r.getTag() === DISMISS_CHAT_KEYBOARD)?.preventBegin();
-      }
-    })
   }
 }

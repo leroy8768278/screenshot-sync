@@ -1,6 +1,7 @@
 package local.snapsync.android;
 
 import android.Manifest;
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
@@ -31,6 +32,8 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.inputmethod.InputMethodManager;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 import android.util.Size;
 import android.widget.Button;
 import android.widget.EditText;
@@ -125,6 +128,8 @@ public final class MainActivity extends Activity {
     private ArrayList<Uri> selectedMedia = new ArrayList<>();
     private ManualSend manual;
     private DeviceChat chat;
+    private ScrollView home;
+    private OnBackInvokedCallback chatBack;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -153,6 +158,34 @@ public final class MainActivity extends Activity {
         chat.restore(savedInstanceState, pairing);
         SyncScheduler.configure(this, pairing);
         showSavedStatus();
+    }
+
+    void showChatPage(boolean show) {
+        if (show == chat.isOpen()) { return; }
+        View focused = getCurrentFocus();
+        if (focused != null && focused.onCheckIsTextEditor()) {
+            getSystemService(InputMethodManager.class).hideSoftInputFromWindow(focused.getWindowToken(), 0);
+        }
+        home.setVisibility(show ? View.GONE : View.VISIBLE);
+        chat.page.setVisibility(show ? View.VISIBLE : View.GONE);
+        if (show) { chat.page.requestFocus(); }
+        if (Build.VERSION.SDK_INT >= 33) {
+            if (show) {
+                chatBack = chat::returnHome;
+                getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    OnBackInvokedDispatcher.PRIORITY_DEFAULT, chatBack);
+            } else {
+                getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(chatBack);
+                chatBack = null;
+            }
+        }
+    }
+
+    @Override
+    @SuppressLint("GestureBackNavigation") // The window callback above handles API 33+.
+    public void onBackPressed() {
+        if (chat.isOpen()) { chat.returnHome(); }
+        else { super.onBackPressed(); }
     }
 
     @Override
@@ -232,11 +265,12 @@ public final class MainActivity extends Activity {
     }
 
     private View buildContent() {
-        ScrollView scroll = new ScrollView(this);
-        scroll.setBackgroundColor(BACKGROUND);
-        scroll.setFillViewport(true);
-        scroll.setClipToPadding(false);
-        scroll.setOnApplyWindowInsetsListener((view, insets) -> {
+        FrameLayout screens = new FrameLayout(this);
+        screens.setBackgroundColor(BACKGROUND);
+        home = new ScrollView(this);
+        home.setFillViewport(true);
+        screens.addView(home);
+        screens.setOnApplyWindowInsetsListener((view, insets) -> {
             if (Build.VERSION.SDK_INT >= 30) {
                 Insets edges = insets.getInsets(
                     WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout() | WindowInsets.Type.ime());
@@ -249,7 +283,7 @@ public final class MainActivity extends Activity {
         });
         getWindow().getDecorView().setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);
         FrameLayout centered = new FrameLayout(this);
-        scroll.addView(centered, new ScrollView.LayoutParams(
+        home.addView(centered, new ScrollView.LayoutParams(
             ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
 
         LinearLayout page = column();
@@ -275,7 +309,8 @@ public final class MainActivity extends Activity {
         syncPanel = statusCard();
         add(page, pairingPanel, 20);
         add(page, syncPanel, 12);
-        return scroll;
+        screens.addView(chat.page);
+        return screens;
     }
 
     private LinearLayout pairingCard() {
@@ -349,7 +384,7 @@ public final class MainActivity extends Activity {
         add(destination, connectionSettings, 10);
         add(page, destination, 0);
         chat = new DeviceChat(this);
-        add(page, chat.view, 12);
+        add(page, chat.entry, 12);
 
         LinearLayout card = card(R.string.automatic);
         syncMode = label(0, 14, INK, true);

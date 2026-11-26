@@ -1,2 +1,3 @@
 "CFBundleDisplayName" = "SnapRelay";
 "CFBundleName" = "SnapRelay";
+"NSScreenCaptureUsageDescription" = "SnapRelay captures the screen area or window you select so you can edit, copy, or save the screenshot.";

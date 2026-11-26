@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import ScreenCaptureKit
 import SwiftUI
 
 @MainActor
@@ -22,42 +23,54 @@ final class LocalCaptureController: NSObject, ObservableObject, NSWindowDelegate
 
     func updateAccess() { hasScreenAccess = CGPreflightScreenCaptureAccess() }
 
+    static func confirmScreenAccess(preflightGranted: Bool = CGPreflightScreenCaptureAccess(),
+                                    checkShareableContent: () async throws -> Void = {
+                                        _ = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+                                    }) async throws {
+        // A negative preflight is inconclusive. Explicit capture requests may ask ScreenCaptureKit.
+        if !preflightGranted { try await checkShareableContent() }
+    }
+
     func openPermissions() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
             NSWorkspace.shared.open(url)
         }
     }
 
-    func requestAccess() {
-        hasScreenAccess = CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess()
-        if !hasScreenAccess { openPermissions() }
-    }
-
     func start() {
         guard !selecting else { return }
         selecting = true
-        hasScreenAccess = CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess()
-        guard hasScreenAccess else {
-            defer { selecting = false }
-            let alert = NSAlert()
-            alert.messageText = "允许即图截取屏幕"
-            alert.informativeText = "在系统设置的「隐私与安全性」中，允许即图录制屏幕，再开始截图。"
-            alert.addButton(withTitle: "打开系统设置")
-            alert.addButton(withTitle: "取消")
-            NSApp.activate(ignoringOtherApps: true)
-            if alert.runModal() == .alertFirstButtonReturn { openPermissions() }
-            return
-        }
         Task {
             defer { selecting = false }
             do {
+                try await Self.confirmScreenAccess()
+                hasScreenAccess = true
                 if let image = try await selectRegion() { presentEditor(image) }
+            } catch let error as SCStreamError where error.code == .userDeclined {
+                hasScreenAccess = false
+                showAccessInstructions()
             } catch {
                 let alert = NSAlert(error: error)
                 NSApp.activate(ignoringOtherApps: true)
                 alert.runModal()
             }
         }
+    }
+
+    private func showAccessInstructions() {
+        let alert = NSAlert()
+        alert.messageText = "请允许即图截取屏幕"
+        alert.informativeText = """
+            在系统设置的「隐私与安全性」中，打开屏幕录制权限并允许即图。
+
+            如果开关已经打开，请从权限列表移除旧的即图，点「＋」添加下方的 App，然后退出并重新打开即图。
+
+            \(Bundle.main.bundleURL.path)
+            """
+        alert.addButton(withTitle: "打开系统设置")
+        alert.addButton(withTitle: "取消")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn { openPermissions() }
     }
 
     private func selectRegion() async throws -> CGImage? {
@@ -111,13 +124,11 @@ struct LocalCaptureSettings: View {
             }
             Section("屏幕录制权限") {
                 HStack {
-                    Label(capture.hasScreenAccess ? "已允许截屏" : "需要授权才能截屏",
-                          systemImage: capture.hasScreenAccess ? "checkmark.circle" : "lock")
+                    Label(capture.hasScreenAccess ? "已允许截屏" : "开始截屏时确认权限",
+                          systemImage: capture.hasScreenAccess ? "checkmark.circle" : "info.circle")
                     Spacer()
-                    if !capture.hasScreenAccess {
-                        Button("去授权", action: capture.requestAccess)
-                            .accessibilityIdentifier("local-capture-permission")
-                    }
+                    Button("打开系统设置", action: capture.openPermissions)
+                        .accessibilityIdentifier("local-capture-permission")
                 }
             }
         }

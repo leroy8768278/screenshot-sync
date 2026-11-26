@@ -2,7 +2,7 @@ import QuickLook
 import SwiftUI
 import UniformTypeIdentifiers
 
-private struct ChatClearPlan: Identifiable {
+struct ChatClearPlan: Identifiable {
     let id = UUID()
     let count: Int
     let through: Int
@@ -10,9 +10,11 @@ private struct ChatClearPlan: Identifiable {
 }
 
 @MainActor
-private final class PhoneConversation: ObservableObject {
+final class PhoneConversation: ObservableObject {
     let receiver: Receiver
-    @Published var expanded = false
+    var isViewing = false
+    var action: Task<Void, Never>?
+    var download: Task<Void, Never>?
     @Published private(set) var entries: [ConversationEntry] = []
     @Published private(set) var macName = "Mac"
     @Published private(set) var lastRead: Int
@@ -76,7 +78,7 @@ private final class PhoneConversation: ObservableObject {
                 if !visible.isEmpty { entries.append(contentsOf: visible) }
                 more = page.hasMore
                 guard !more || previous > cursor else { throw SyncIssue.invalidResponse }
-                if expanded { markRead() }
+                if isViewing { markRead() }
             } while more
             if connectionError != nil { connectionError = nil }
         } catch {
@@ -89,7 +91,7 @@ private final class PhoneConversation: ObservableObject {
     func poll() async {
         while !Task.isCancelled {
             await refresh()
-            do { try await Task.sleep(for: .seconds(connectionError == nil ? (expanded ? 2 : 5) : 8)) }
+            do { try await Task.sleep(for: .seconds(connectionError == nil ? (isViewing ? 2 : 5) : 8)) }
             catch { return }
         }
     }
@@ -202,100 +204,101 @@ private final class PhoneConversation: ObservableObject {
     }
 }
 
-struct DeviceConversation: View {
-    @Environment(\.scenePhase) private var phase
-    @StateObject private var chat: PhoneConversation
+struct ConversationLink: View {
+    @ObservedObject var chat: PhoneConversation
+
+    var body: some View {
+        NavigationLink {
+            DeviceConversation(chat: chat)
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "bubble.left.and.bubble.right")
+                    .foregroundStyle(.indigo)
+                    .frame(width: 36, height: 36)
+                    .background(.indigo.opacity(0.14), in: RoundedRectangle(cornerRadius: 10))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("与 \(chat.macName) 对话").font(.headline).lineLimit(2)
+                    Text(chat.entries.last?.snippet ?? "文字和文件")
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                if chat.unread > 0 {
+                    Text("\(chat.unread) 条未读").font(.caption2.bold())
+                        .padding(.horizontal, 7).padding(.vertical, 4)
+                        .background(.indigo.opacity(0.18), in: Capsule())
+                }
+            }
+            .padding(.vertical, 4)
+        }
+        .accessibilityIdentifier("phone-chat-open")
+    }
+}
+
+private struct DeviceConversation: View {
+    @ObservedObject var chat: PhoneConversation
     @State private var picking = false
     @State private var preview: URL?
     @State private var exportSource: URL?
     @State private var plan: ChatClearPlan?
     @State private var savedDownloads: ChatDownloadSnapshot?
-    @State private var action: Task<Void, Never>?
-    @State private var download: Task<Void, Never>?
     @FocusState private var composing: Bool
-
-    init(receiver: Receiver) {
-        _chat = StateObject(wrappedValue: PhoneConversation(receiver: receiver))
-    }
+    @State private var visibleMessage: UUID?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.18)) { chat.expanded.toggle() }
-                if chat.expanded { chat.markRead() } else { composing = false }
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: "bubble.left.and.bubble.right")
-                        .font(.headline)
-                        .frame(width: 36, height: 36)
-                        .background(.indigo.opacity(0.14), in: RoundedRectangle(cornerRadius: 10))
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("与 \(chat.macName) 对话").font(.headline).foregroundStyle(.primary)
-                            .lineLimit(2)
-                        Text(chat.entries.last?.snippet ?? "文字和文件")
-                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                    Spacer(minLength: 4)
-                    if chat.unread > 0 {
-                        Text("\(chat.unread) 条未读").font(.caption2.bold())
-                            .padding(.horizontal, 7).padding(.vertical, 4)
-                            .background(.indigo.opacity(0.18), in: Capsule())
-                    }
-                    Image(systemName: chat.expanded ? "chevron.up" : "chevron.down")
-                        .font(.caption.bold()).foregroundStyle(.secondary)
+        VStack(spacing: 0) {
+            messageList
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Divider()
+            VStack(alignment: .leading, spacing: 6) {
+                if let error = chat.connectionError {
+                    Label(error, systemImage: "wifi.exclamationmark").font(.caption).foregroundStyle(.secondary)
                 }
-                .contentShape(Rectangle())
+                if let notice = chat.notice {
+                    Text(notice).font(.caption).foregroundStyle(.secondary)
+                }
+                composer
             }
-            .buttonStyle(.borderless)
-            .accessibilityValue(chat.expanded ? "已展开" : "已收起")
-            if chat.expanded {
-                VStack(alignment: .leading, spacing: 12) {
-                    Divider()
-                    HStack {
-                        Button("已下载文件") {
-                            Task {
-                                do {
-                                    savedDownloads = try await ConversationDownloads.shared.snapshot(chat.receiver)
-                                } catch { chat.notice = "无法读取已下载文件。\(error.localizedDescription)" }
-                            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+        .tint(.indigo)
+        .navigationTitle(chat.macName)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button("已下载文件", systemImage: "folder") {
+                        Task {
+                            do { savedDownloads = try await ConversationDownloads.shared.snapshot(chat.receiver) }
+                            catch { chat.notice = "无法读取已下载文件。\(error.localizedDescription)" }
                         }
-                        Spacer()
-                        Button("清除对话记录…", role: .destructive) {
-                            composing = false
-                            Task {
-                                do { plan = try await chat.cleanupPlan() }
-                                catch { chat.notice = "无法准备清除。\(error.localizedDescription)" }
-                            }
+                    }
+                    Button("清除对话记录", systemImage: "trash", role: .destructive) {
+                        composing = false
+                        Task {
+                            do { plan = try await chat.cleanupPlan() }
+                            catch { chat.notice = "无法准备清除。\(error.localizedDescription)" }
                         }
-                        .accessibilityIdentifier("phone-chat-clear")
                     }
-                    .font(.caption)
-                    .buttonStyle(.borderless)
-                    .disabled(chat.working || chat.receiving != nil)
-                    messageList
-                    composer
-                    if let error = chat.connectionError {
-                        Label(error, systemImage: "wifi.exclamationmark").font(.caption).foregroundStyle(.secondary)
-                    }
-                    if let notice = chat.notice {
-                        Text(notice).font(.caption).foregroundStyle(.secondary)
-                    }
+                    .accessibilityIdentifier("phone-chat-clear")
+                } label: {
+                    Label("对话选项", systemImage: "ellipsis.circle")
                 }
-                .padding(.top, 12)
+                .disabled(chat.working || chat.receiving != nil)
+                .accessibilityIdentifier("phone-chat-options")
             }
         }
-        .padding(.vertical, 4)
-        .task(id: phase) { if phase == .active { await chat.poll() } }
-        .onDisappear { action?.cancel(); download?.cancel() }
+        .onAppear { chat.isViewing = true; chat.markRead() }
+        .onDisappear { chat.isViewing = false }
         .fileImporter(isPresented: $picking, allowedContentTypes: exportSource == nil ? [.item] : [.folder], allowsMultipleSelection: exportSource == nil) { result in
             let exporting = exportSource
             exportSource = nil
             switch result {
             case .success(let urls):
                 if let exporting, let folder = urls.first {
-                    action = Task { await chat.saveToFiles(exporting, folder: folder) }
+                    chat.action = Task { await chat.saveToFiles(exporting, folder: folder) }
                 } else if exporting == nil {
-                    action = Task { await chat.attach(urls) }
+                    chat.action = Task { await chat.attach(urls) }
                 }
             case .failure(let error):
                 if (error as NSError).code != NSUserCancelledError { chat.notice = error.localizedDescription }
@@ -304,7 +307,7 @@ struct DeviceConversation: View {
         .sheet(item: $plan) { snapshot in
             ChatClearSheet(plan: snapshot, mac: chat.macName) { removeFiles in
                 plan = nil
-                action = Task { await chat.clear(snapshot, includingDownloads: removeFiles) }
+                chat.action = Task { await chat.clear(snapshot, includingDownloads: removeFiles) }
             }
         }
         .sheet(item: $savedDownloads) { snapshot in
@@ -319,17 +322,19 @@ struct DeviceConversation: View {
             Text("暂无消息").font(.subheadline).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, minHeight: 58)
         } else {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 12) {
-                        ForEach(chat.entries) { entry in row(entry).id(entry.id) }
-                    }
-                    .padding(.vertical, 2)
+            ScrollView {
+                LazyVStack(spacing: 12) {
+                    ForEach(chat.entries) { entry in row(entry).id(entry.id) }
                 }
-                .frame(height: 220)
-                .defaultScrollAnchor(.bottom)
-                .onChange(of: chat.entries.last?.id) { _, id in
-                    if let id { proxy.scrollTo(id, anchor: .bottom) }
+                .scrollTargetLayout()
+                .padding(12)
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .scrollPosition(id: $visibleMessage, anchor: .bottom)
+            .onAppear { visibleMessage = chat.entries.last?.id }
+            .onChange(of: chat.entries.last?.id) { previous, latest in
+                if visibleMessage == previous || chat.entries.last?.sender == .phone {
+                    visibleMessage = latest
                 }
             }
         }
@@ -372,7 +377,7 @@ struct DeviceConversation: View {
                         ProgressView().controlSize(.small)
                     } else {
                         Button(mine ? "查看" : "接收") {
-                            download = Task {
+                            chat.download = Task {
                                 await chat.receive(entry)
                                 if mine { preview = chat.files[entry.id] }
                             }
@@ -390,7 +395,8 @@ struct DeviceConversation: View {
         VStack(alignment: .leading, spacing: 8) {
             TextField("输入或粘贴文字…", text: $chat.draft, axis: .vertical)
                 .font(.subheadline)
-                .lineLimit(2...5)
+                .lineLimit(1...4)
+                .accessibilityIdentifier("phone-chat-input")
                 .focused($composing)
                 .background {
                     if composing {
@@ -399,15 +405,24 @@ struct DeviceConversation: View {
                     }
                 }
                 .disabled(chat.working)
-            ForEach(chat.attachments) { file in
-                HStack {
-                    Image(systemName: "paperclip")
-                    Text(file.name).lineLimit(1)
-                    Spacer()
-                    Button { chat.remove(file) } label: { Image(systemName: "xmark.circle.fill") }
-                        .accessibilityLabel("移除附件 \(file.name)")
+            if !chat.attachments.isEmpty {
+                ScrollView(.horizontal) {
+                    HStack {
+                        ForEach(chat.attachments) { file in
+                            HStack(spacing: 5) {
+                                Image(systemName: "paperclip")
+                                Text(file.name).lineLimit(1).truncationMode(.middle).frame(maxWidth: 175)
+                                Button { chat.remove(file) } label: { Image(systemName: "xmark.circle.fill") }
+                                    .accessibilityLabel("移除附件 \(file.name)")
+                            }
+                            .font(.caption)
+                            .padding(6)
+                            .background(Color.secondary.opacity(0.12), in: Capsule())
+                        }
+                    }
                 }
-                .font(.caption).foregroundStyle(.secondary).disabled(chat.working)
+                .scrollIndicators(.hidden)
+                .disabled(chat.working)
             }
             HStack(spacing: 8) {
                 Button { exportSource = nil; picking = true } label: { Label("选文件", systemImage: "paperclip") }
@@ -416,7 +431,7 @@ struct DeviceConversation: View {
                 if chat.working { ProgressView().controlSize(.small) }
                 Button {
                     composing = false
-                    action = Task { await chat.send() }
+                    chat.action = Task { await chat.send() }
                 } label: {
                     Text("发送")
                         .fontWeight(.semibold)

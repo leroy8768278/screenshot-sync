@@ -24,6 +24,8 @@ struct ShotSyncApp: App {
 private struct SyncHome: View {
     @ObservedObject var sync: PhotoSync
     @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var phase
+    @State private var chat: PhoneConversation?
     @State private var connection: ConnectionScreen?
     @State private var manualDestination: ManualDestination?
 
@@ -71,9 +73,9 @@ private struct SyncHome: View {
                                 .foregroundStyle(.primary)
                         }
 
-                        if receiver.pairedAt != nil {
-                            DeviceConversation(receiver: receiver)
-                                .id(receiver.historyKey + receiver.displayAddress)
+                        if let chat {
+                            ConversationLink(chat: chat)
+                                .id(ObjectIdentifier(chat))
                         }
                     }
 
@@ -153,6 +155,17 @@ private struct SyncHome: View {
                 ManualSelectionSheet(sync: sync, destination: destination.receiver)
                     .tint(accent)
             }
+        }
+        .onChange(of: sync.receiver, initial: true) { _, receiver in
+            let paired = receiver.flatMap { $0.pairedAt == nil ? nil : $0 }
+            guard chat?.receiver.historyKey != paired?.historyKey ||
+                  chat?.receiver.displayAddress != paired?.displayAddress else { return }
+            chat?.action?.cancel()
+            chat?.download?.cancel()
+            chat = paired.map(PhoneConversation.init)
+        }
+        .task(id: phase == .active ? chat.map(ObjectIdentifier.init) : nil) {
+            if phase == .active { await chat?.poll() }
         }
     }
 
