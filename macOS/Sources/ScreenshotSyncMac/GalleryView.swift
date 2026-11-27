@@ -78,14 +78,16 @@ struct GalleryView: View {
                     .accessibilityIdentifier("gallery-refresh")
             }
             ToolbarItem(placement: .primaryAction) {
+                Button("清除全部图片", role: .destructive, action: prepareImageCleanup)
+                    .disabled(cleanupBusy || showingCleanupConfirmation)
+                    .help("将传图文件夹内所有来源的图片移到废纸篓")
+                    .accessibilityIdentifier("gallery-clear-images")
+            }
+            ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Button("在访达中打开传图文件夹", action: model.openFolder)
                     Button("更改存储位置", action: model.selectFolder)
                     Button("本机截图设置") { openWindow(id: "local-capture-settings") }
-                    Divider()
-                    Button("清除全部图片", role: .destructive, action: prepareImageCleanup)
-                        .disabled(cleanupBusy || showingCleanupConfirmation)
-                        .accessibilityIdentifier("gallery-clear-images")
                 } label: {
                     Label("图库选项", systemImage: "ellipsis")
                 }

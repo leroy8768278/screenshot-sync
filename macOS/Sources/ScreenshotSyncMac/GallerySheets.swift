@@ -407,15 +407,35 @@ struct ConnectionSheet: View {
                 .padding(12)
                 .background(theme.panel, in: RoundedRectangle(cornerRadius: 14))
                 .overlay { RoundedRectangle(cornerRadius: 14).strokeBorder(theme.border) }
-            DisclosureGroup("手动配对", isExpanded: $showManualPairing) {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        manualPairing
+            VStack(alignment: .leading, spacing: 6) {
+                Button {
+                    showManualPairing.toggle()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: showManualPairing ? "chevron.down" : "chevron.forward")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 12)
+                            .accessibilityHidden(true)
+                        Text("手动配对")
                     }
-                    .padding(2)
+                    .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
-                .frame(height: 130)
-                .padding(.top, 6)
+                .buttonStyle(.plain)
+                .accessibilityValue(showManualPairing ? "已展开" : "已收起")
+                .accessibilityIdentifier("pairing-manual-toggle")
+
+                if showManualPairing {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 12) {
+                            manualPairing
+                        }
+                        .padding(2)
+                    }
+                    .frame(height: 130)
+                    .padding(.leading, 18)
+                }
             }
             Divider()
             HStack(alignment: .top) {
