@@ -26,11 +26,12 @@ struct ScreenshotSyncApp: App {
             GalleryView(model: model, capture: capture)
                 .frame(minWidth: 660, minHeight: 515)
         }
-        .defaultSize(width: 1_015, height: 690)
+        .defaultSize(width: 1_024, height: 712)
+        .windowResizability(.contentMinSize)
         .windowToolbarStyle(.unified)
         .commands {
             CommandGroup(replacing: .appSettings) {
-                Button("本机截图设置…") { openWindow(id: "local-capture-settings") }
+                Button("本机截图设置") { openWindow(id: "local-capture-settings") }
                     .keyboardShortcut(",", modifiers: .command)
             }
         }
@@ -50,9 +51,9 @@ struct ScreenshotSyncApp: App {
                 .disabled(!model.status.canToggle)
             Button("打开截图文件夹", action: model.openFolder)
             Divider()
-            Button("本机截图…", action: capture.start)
+            Button("本机截图", action: capture.start)
                 .disabled(capture.selecting)
-            Button("本机截图设置…") {
+            Button("本机截图设置") {
                 NSApp.activate(ignoringOtherApps: true)
                 openWindow(id: "local-capture-settings")
             }

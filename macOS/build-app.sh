@@ -31,6 +31,11 @@ mkdir -p "$package/Contents/MacOS" "$package/Contents/Resources"
 install -m 755 "$bin_dir/ScreenshotSyncMac" "$package/Contents/MacOS/ScreenshotSyncMac"
 install -m 644 "$mac_dir/Info.plist" "$package/Contents/Info.plist"
 install -m 644 "$mac_dir/Resources/AppIcon.icns" "$package/Contents/Resources/AppIcon.icns"
+# Use the same receiver illustrations as the mobile apps.
+mkdir -p "$package/Contents/Resources/ReceiverModels"
+for artwork in "$mac_dir"/../ios/ShotSync/Assets.xcassets/receiver_*.imageset/*.png; do
+  install -m 644 "$artwork" "$package/Contents/Resources/ReceiverModels/${artwork:t}"
+done
 for strings in "$mac_dir"/Resources/*.lproj/InfoPlist.strings; do
   localization=${strings:h:t}
   install -d "$package/Contents/Resources/$localization"

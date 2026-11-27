@@ -91,7 +91,7 @@ struct ScreenshotPreviewSheet: View {
             }
             .padding(14)
             .frame(height: 398)
-            .background(theme.mat(for: source), in: RoundedRectangle(cornerRadius: 9))
+            .background(theme.mat(for: source), in: RoundedRectangle(cornerRadius: 14))
 
             HStack(spacing: 10) {
                 if let pixels {
@@ -108,7 +108,7 @@ struct ScreenshotPreviewSheet: View {
                     switch feedback {
                     case .copied:
                         Label("图片已复制", systemImage: "checkmark.circle")
-                            .foregroundStyle(.green)
+                            .foregroundStyle(theme.accent)
                     case .failed(let message):
                         Text(message).foregroundStyle(.red)
                     }
@@ -121,6 +121,7 @@ struct ScreenshotPreviewSheet: View {
                         Label("复制图片", systemImage: "document.on.document")
                     }
                     .buttonStyle(.borderedProminent)
+                    .tint(GalleryTheme.brand)
                     .keyboardShortcut("c", modifiers: .command)
                     .accessibilityIdentifier("preview-copy")
                 }
@@ -132,7 +133,7 @@ struct ScreenshotPreviewSheet: View {
             .font(.callout.monospacedDigit())
             .foregroundStyle(.secondary)
         }
-        .padding(16)
+        .padding(18)
         .frame(width: 575)
         .background(theme.panel)
         .accessibilityIdentifier("gallery-preview")
@@ -281,7 +282,7 @@ struct DeviceManagerSheet: View {
     }
 
     private func deviceRows(_ devices: [ScreenshotDevice], counts: [ScreenshotDevice: Int]) -> some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 0) {
             ForEach(devices) { device in
                 let title = model.name(for: device)
                 HStack(alignment: .top, spacing: 12) {
@@ -289,7 +290,7 @@ struct DeviceManagerSheet: View {
                         .font(.system(size: 23, weight: .medium))
                         .foregroundStyle(theme.accent)
                         .frame(width: 40, height: 44)
-                        .background(theme.mat(for: device.source), in: RoundedRectangle(cornerRadius: 10))
+                        .background(theme.selection, in: RoundedRectangle(cornerRadius: 10))
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 6) {
                         if editing == device {
@@ -307,6 +308,7 @@ struct DeviceManagerSheet: View {
                                     .accessibilityIdentifier("device-name-input")
                                 Button("保存") { save(device) }
                                     .buttonStyle(.borderedProminent)
+                                    .tint(GalleryTheme.brand)
                                     .accessibilityIdentifier("device-name-save")
                                 Button("取消") {
                                     editing = nil
@@ -359,10 +361,13 @@ struct DeviceManagerSheet: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(12)
-                .background(theme.panel, in: RoundedRectangle(cornerRadius: 11))
-                .overlay { RoundedRectangle(cornerRadius: 11).strokeBorder(theme.border) }
+                if device.id != devices.last?.id {
+                    Divider().padding(.leading, 64)
+                }
             }
         }
+        .background(theme.panel, in: RoundedRectangle(cornerRadius: 14))
+        .overlay { RoundedRectangle(cornerRadius: 14).strokeBorder(theme.border) }
     }
 
     private func save(_ device: ScreenshotDevice) {
@@ -379,37 +384,38 @@ struct DeviceManagerSheet: View {
 struct ConnectionSheet: View {
     @ObservedObject var model: ReceiverModel
     @Environment(\.dismiss) private var dismiss
-    @State private var pairingMethod: PairingMethod = .scan
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var showManualPairing = false
     @State private var showCode = false
     @State private var confirmReset = false
     @State private var copied: String?
 
-    private enum PairingMethod { case scan, manual }
+    private var theme: GalleryTheme { GalleryTheme(colorScheme) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 15) {
             HStack {
-                Text("连接手机").font(.headline)
+                Text("扫码配对")
+                    .font(.title2.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
                 Spacer()
                 Button("关闭") { dismiss() }
                     .keyboardShortcut(.cancelAction)
             }
-            Picker("配对方式", selection: $pairingMethod) {
-                Text("扫码配对").tag(PairingMethod.scan)
-                Text("手动配对").tag(PairingMethod.manual)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            if pairingMethod == .scan {
-                qrPairing
-            } else {
+            qrPairing
+                .frame(maxWidth: .infinity)
+                .padding(12)
+                .background(theme.panel, in: RoundedRectangle(cornerRadius: 14))
+                .overlay { RoundedRectangle(cornerRadius: 14).strokeBorder(theme.border) }
+            DisclosureGroup("手动配对", isExpanded: $showManualPairing) {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
                         manualPairing
                     }
                     .padding(2)
                 }
-                .frame(minHeight: 150, idealHeight: 165, maxHeight: 220)
+                .frame(height: 130)
+                .padding(.top, 6)
             }
             Divider()
             HStack(alignment: .top) {
@@ -436,8 +442,10 @@ struct ConnectionSheet: View {
                 Text(error).font(.caption).foregroundStyle(.red)
             }
         }
-        .padding(17)
+        .padding(20)
         .frame(width: 515)
+        .background(theme.page)
+        .tint(theme.accent)
         .alert("重新生成配对码？", isPresented: $confirmReset) {
             Button("取消", role: .cancel) {}
             Button("重新生成") {
@@ -458,7 +466,7 @@ struct ConnectionSheet: View {
                 PairingCodeImage(code: code).equatable()
                 VStack(alignment: .leading, spacing: 9) {
                     Text("用手机扫一扫").font(.headline)
-                    Text("手机和 Mac 连入同一局域网后，打开手机上的「即图」，点「扫一扫配对」对准此二维码。")
+                    Text("让手机和 Mac 接入同一局域网，打开手机上的即图，点「扫码连接 Mac」对准二维码。")
                     Text("手机已配对时，点「扫码更换 Mac」即可切换。")
                         .foregroundStyle(.secondary)
                 }
@@ -505,7 +513,7 @@ struct ConnectionSheet: View {
             .accessibilityLabel(showCode ? "隐藏配对码" : "显示配对码")
             copyButton(model.token)
         }
-        Button("重新生成配对码…") { confirmReset = true }
+        Button("重新生成配对码") { confirmReset = true }
             .buttonStyle(.link)
             .font(.callout)
     }

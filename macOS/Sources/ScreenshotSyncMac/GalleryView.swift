@@ -8,17 +8,11 @@ struct GalleryView: View {
     @Environment(\.openWindow) private var openWindow
     @AppStorage("recentScreenshotSource") private var source: ScreenshotSource = .iOS
     @State private var showingUnclassified = false
-    @State private var filters: [ScreenshotSource: DeviceFilter] = [:]
+    @State private var filters: [ScreenshotSource: GalleryDeviceFilter] = [:]
     @State private var sheet: GallerySheet?
     @State private var cleanupPlan: Inbox.ImageCleanupPlan?
     @State private var showingCleanupConfirmation = false
     @State private var cleanupBusy = false
-
-    private enum DeviceFilter: Equatable {
-        case all
-        case device(ScreenshotDevice)
-        case unknown
-    }
 
     private enum GallerySheet: Identifiable {
         case connection
@@ -51,68 +45,53 @@ struct GalleryView: View {
             }
         }
 
-        VStack(spacing: 0) {
-            platformBar
-            if activeSource == .mac {
-                localCaptureBar
-            } else if let activeSource {
-                deviceBar(source: activeSource, devices: devices, hasUnknown: hasUnknown, filter: filter)
-            }
-            if case .failed(let reason) = model.status {
-                Label(reason, systemImage: "exclamationmark.triangle")
-                    .font(.callout)
-                    .foregroundStyle(.red)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 23)
-                    .padding(.vertical, 8)
-            }
-            if let error = model.errorMessage {
-                HStack {
-                    Label(error, systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.red)
-                    Spacer()
-                    Button("关闭") { model.errorMessage = nil }
-                        .buttonStyle(.borderless)
+        GeometryReader { window in
+            let sidebarWidth = min(215, max(155, window.size.width * 0.205))
+            let inset: CGFloat = window.size.width < 800 ? 16 : 24
+            let contentWidth = max(1, window.size.width - sidebarWidth - inset * 2 - 1)
+            HStack(spacing: 0) {
+                GallerySourceSidebar(model: model, source: activeSource, theme: theme) { selected in
+                    if let selected { source = selected }
+                    showingUnclassified = selected == nil
                 }
-                .font(.callout)
-                .padding(.horizontal, 23)
-                .padding(.vertical, 8)
+                .frame(width: sidebarWidth)
+                Divider()
+                VStack(alignment: .leading, spacing: 0) {
+                    galleryHeader(width: contentWidth, devices: devices, hasUnknown: hasUnknown,
+                                  filter: filter, count: visible.count)
+                        .padding(.horizontal, inset)
+                        .padding(.top, 19)
+                        .padding(.bottom, 15)
+                    notices.padding(.horizontal, inset)
+                    gallery(visible, filter: filter, width: contentWidth, inset: inset)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
-            if case .device(let device) = filter {
-                DeviceConversationView(room: model.conversation(for: device),
-                                       deviceName: model.name(for: device), theme: theme)
-                    .id(device)
-                    .padding(.horizontal, 23)
-                    .padding(.top, 14)
-            }
-            gallery(visible)
         }
         .background(theme.page)
+        .tint(theme.accent)
         .toolbar {
-            let status = ToolbarItem(placement: .primaryAction) {
-                ReceiverStatusLabel(status: model.status)
-                    .fixedSize()
-                    .padding(.horizontal, 5)
-            }
-            if #available(macOS 26.0, *) {
-                status.sharedBackgroundVisibility(.hidden)
-            } else {
-                status
-            }
             ToolbarItem(placement: .primaryAction) {
                 Button("刷新", action: model.refreshRecent)
                     .keyboardShortcut("r", modifiers: .command)
-                    .help("重新读取文件夹，移除已删除的媒体预览")
+                    .help("重新读取传图文件夹")
                     .accessibilityIdentifier("gallery-refresh")
             }
             ToolbarItem(placement: .primaryAction) {
-                Button("清除全部图片", action: prepareImageCleanup)
-                    .disabled(cleanupBusy || showingCleanupConfirmation)
-                    .help("将传图文件夹中所有来源的图片移到废纸篓")
-                    .accessibilityIdentifier("gallery-clear-images")
-            }
-            if #available(macOS 26.0, *) {
-                ToolbarSpacer(.fixed, placement: .primaryAction)
+                Menu {
+                    Button("在访达中打开传图文件夹", action: model.openFolder)
+                    Button("更改存储位置", action: model.selectFolder)
+                    Button("本机截图设置") { openWindow(id: "local-capture-settings") }
+                    Divider()
+                    Button("清除全部图片", role: .destructive, action: prepareImageCleanup)
+                        .disabled(cleanupBusy || showingCleanupConfirmation)
+                        .accessibilityIdentifier("gallery-clear-images")
+                } label: {
+                    Label("图库选项", systemImage: "ellipsis")
+                }
+                .accessibilityLabel("图库选项")
+                .accessibilityIdentifier("gallery-options")
+                .help("图库选项")
             }
             ToolbarItem(placement: .primaryAction) {
                 Button { sheet = .connection } label: {
@@ -120,6 +99,7 @@ struct GalleryView: View {
                 }
                 .labelStyle(.titleAndIcon)
                 .buttonStyle(.borderedProminent)
+                .tint(GalleryTheme.brand)
                 .help("显示手机配对二维码、手动配对信息和保存位置")
                 .accessibilityIdentifier("gallery-connect")
             }
@@ -202,155 +182,156 @@ struct GalleryView: View {
         }
     }
 
-    private var platformBar: some View {
-        HStack(spacing: 5) {
-            ForEach(ScreenshotSource.allCases, id: \.self) { platform in
-                GalleryTab(platform == .mac ? "本机截图" : platform.label, selected: activeSource == platform, theme: theme) {
-                    source = platform
-                    showingUnclassified = false
-                }
-                .accessibilityIdentifier("platform-\(platform.rawValue)")
-            }
-            Spacer(minLength: 12)
-            GalleryTab("未归类", selected: showingUnclassified, theme: theme) {
-                showingUnclassified = true
-            }
-            .accessibilityIdentifier("platform-unclassified")
+    @ViewBuilder
+    private var notices: some View {
+        if case .failed(let reason) = model.status {
+            Label(reason, systemImage: "exclamationmark.triangle")
+                .font(.callout).foregroundStyle(.red)
+                .padding(.bottom, 8)
         }
-        .padding(.horizontal, 23)
-        .padding(.vertical, 8)
-        .background(theme.panel)
-        .overlay(alignment: .bottom) { Rectangle().fill(theme.border).frame(height: 1) }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("平台来源")
-    }
-
-    private var localCaptureBar: some View {
-        HStack(spacing: 12) {
-            Button(action: capture.start) {
-                Label("开始截图", systemImage: "viewfinder")
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(capture.selecting)
-            .accessibilityIdentifier("local-capture-start")
-            Spacer()
-            Button {
-                openWindow(id: "local-capture-settings")
-            } label: {
-                Label("截图设置", systemImage: "gearshape")
-            }
-            .accessibilityIdentifier("local-capture-settings")
-        }
-        .padding(.horizontal, 23)
-        .padding(.vertical, 9)
-        .background(theme.subnavigation)
-        .overlay(alignment: .bottom) { Rectangle().fill(theme.border).frame(height: 1) }
-    }
-
-    private func deviceBar(
-        source: ScreenshotSource, devices: [ScreenshotDevice], hasUnknown: Bool, filter: DeviceFilter
-    ) -> some View {
-        HStack(spacing: 12) {
-            ScrollView(.horizontal) {
-                HStack(spacing: 5) {
-                    GalleryTab(ReceiverModel.allPicturesLabel, selected: filter == .all, theme: theme, compact: true) {
-                        filters[source] = .all
-                    }
-                    .accessibilityIdentifier("device-all")
-                    ForEach(devices) { device in
-                        let name = model.name(for: device)
-                        let subtitle = model.subtitle(for: device)
-                        GalleryTab(name, selected: filter == .device(device), theme: theme, compact: true, subtitle: subtitle, conversation: model.conversation(for: device)) {
-                            filters[source] = .device(device)
-                        }
-                        .help([name, subtitle].compactMap { $0 }.joined(separator: " · "))
-                        .accessibilityIdentifier("device-\(device.id)")
-                    }
-                    if hasUnknown {
-                        GalleryTab("未识别设备", selected: filter == .unknown, theme: theme, compact: true) {
-                            filters[source] = .unknown
-                        }
-                        .accessibilityIdentifier("device-unknown")
-                    }
-                }
-                .padding(2)
-            }
-            .scrollIndicators(.hidden)
-
-            Button("管理手机") { sheet = .devices(source) }
-                .disabled(devices.isEmpty)
-                .accessibilityIdentifier("gallery-manage-devices")
-        }
-        .padding(.horizontal, 21)
-        .padding(.vertical, 6)
-        .background(theme.subnavigation)
-        .overlay(alignment: .bottom) { Rectangle().fill(theme.border).frame(height: 1) }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(source.label) 手机来源")
-    }
-
-    private func gallery(_ images: [ReceivedScreenshot]) -> some View {
-        let mediaLabel = images.contains(where: \.isVideo) ? "图片和视频" : "截图"
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(activeSource == .mac ? "本机截图" : activeSource.map { "\($0.label) \(mediaLabel)" } ?? "未归类\(mediaLabel)")
-                    .font(.system(size: 22, weight: .semibold))
-                    .accessibilityAddTraits(.isHeader)
+        if let error = model.errorMessage {
+            HStack {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
                 Spacer()
-                Text(mediaLabel == "截图" ? "\(images.count) 张" : "\(images.count) 项")
-                    .font(.callout.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                Button("关闭") { model.errorMessage = nil }.buttonStyle(.borderless)
             }
-            .padding(.horizontal, 23)
-            .padding(.top, 17)
+            .font(.callout)
+            .padding(.bottom, 8)
+        }
+    }
 
-            if images.isEmpty && model.isLoadingInbox {
-                ProgressView("正在读取截图")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if images.isEmpty {
-                VStack(spacing: 9) {
-                    Image(systemName: "photo.on.rectangle")
-                        .font(.system(size: 28, weight: .light))
-                        .accessibilityHidden(true)
-                    Text("还没有截图")
-                        .font(.callout)
-                    if activeSource == .mac {
-                        Text("点击「开始截图」后拖选区域，按空格可选择窗口。")
-                            .font(.caption)
-                    }
+    private func galleryHeader(width: CGFloat, devices: [ScreenshotDevice], hasUnknown: Bool,
+                               filter: GalleryDeviceFilter, count: Int) -> some View {
+        let mobile = activeSource != nil && activeSource != .mac
+        let compact = width < 620
+        let layout = compact ? AnyLayout(VStackLayout(alignment: .leading, spacing: 9))
+                             : AnyLayout(HStackLayout(alignment: .center, spacing: 12))
+        return layout {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(activeSource == .mac ? "本机截图" : activeSource.map { "\($0.label) 图库" } ?? "未归类")
+                    .font(.system(size: 26, weight: .semibold))
+                    .accessibilityAddTraits(.isHeader)
+                Text(summary(filter: filter, devices: devices, count: count, mobile: mobile))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if let activeSource, mobile {
+                let available = compact ? width : max(260, width - 157)
+                GalleryDeviceTabs(model: model, source: activeSource, devices: devices,
+                                  hasUnknown: hasUnknown, selection: filter, width: available,
+                                  theme: theme, select: { filters[activeSource] = $0 },
+                                  manage: { sheet = .devices(activeSource) })
+                .frame(width: available, alignment: compact ? .leading : .trailing)
+            } else if activeSource == .mac {
+                HStack(spacing: 12) {
+                    Button("截图设置") { openWindow(id: "local-capture-settings") }
+                        .buttonStyle(.borderless)
+                        .accessibilityIdentifier("local-capture-settings")
+                    Button(action: capture.start) { Label("开始截图", systemImage: "viewfinder") }
+                        .buttonStyle(.borderedProminent)
+                        .tint(GalleryTheme.brand)
+                        .disabled(capture.selecting)
+                        .accessibilityIdentifier("local-capture-start")
                 }
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: 239), spacing: 13, alignment: .top)],
-                        spacing: 13
-                    ) {
-                        ForEach(images) { image in
-                            let platform = activeSource
-                            ScreenshotTile(
-                                image: image,
-                                deviceLabel: deviceLabel(for: image, source: platform),
-                                source: platform,
-                                theme: theme
-                            ) {
-                                if let index = images.firstIndex(where: { $0.id == image.id }) {
-                                    sheet = .preview(images: images, index: index, source: platform)
+                .fixedSize()
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func summary(filter: GalleryDeviceFilter, devices: [ScreenshotDevice], count: Int, mobile: Bool) -> String {
+        guard mobile else { return "\(count) 项" }
+        switch filter {
+        case .all: return "\(devices.count) 台手机 · \(count) 项"
+        case .device(let device): return "\(model.subtitle(for: device) ?? model.name(for: device)) · \(count) 项"
+        case .unknown: return "未识别设备 · \(count) 项"
+        }
+    }
+
+    private func gallery(_ images: [ReceivedScreenshot], filter: GalleryDeviceFilter,
+                         width: CGFloat, inset: CGFloat) -> some View {
+        let spacing: CGFloat = 13
+        let columnCount = min(6, max(1, Int((width - 12 + spacing) / (207 + spacing))))
+        let columns = Array(repeating: GridItem(.flexible(), spacing: spacing, alignment: .top), count: columnCount)
+        let tileWidth = (width - spacing * CGFloat(columnCount - 1)) / CGFloat(columnCount)
+        let tileHeight = min(232, max(146, tileWidth * 0.78))
+        let calendar = Calendar.autoupdatingCurrent
+        let byDay = Dictionary(grouping: images) { calendar.startOfDay(for: $0.date) }
+
+        return GeometryReader { area in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if case .device(let device) = filter {
+                        DeviceConversationView(room: model.conversation(for: device),
+                                               deviceName: model.name(for: device), theme: theme)
+                            .id(device)
+                    }
+                    if images.isEmpty {
+                        emptyGallery
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        LazyVGrid(columns: columns, alignment: .leading, spacing: spacing) {
+                            ForEach(byDay.keys.sorted(by: >), id: \.self) { day in
+                                Section {
+                                    ForEach(byDay[day, default: []]) { image in
+                                        ScreenshotTile(image: image, deviceLabel: deviceLabel(for: image, source: activeSource),
+                                                       source: activeSource, theme: theme, height: tileHeight) {
+                                            if let index = images.firstIndex(where: { $0.id == image.id }) {
+                                                sheet = .preview(images: images, index: index, source: activeSource)
+                                            }
+                                        }
+                                    }
+                                } header: {
+                                    dayHeading(day, calendar: calendar)
                                 }
                             }
                         }
                     }
-                    .padding(.horizontal, 23)
-                    .padding(.top, 2)
-                    .padding(.bottom, 23)
                 }
+                .padding(.horizontal, inset)
+                .padding(.bottom, 18)
+                .frame(maxWidth: .infinity, minHeight: area.size.height, alignment: .topLeading)
             }
+            .accessibilityIdentifier("gallery-scroll")
+            .id(activeSource)
         }
-        .frame(maxHeight: .infinity, alignment: .top)
     }
 
-    private func validFilter(devices: [ScreenshotDevice], hasUnknown: Bool) -> DeviceFilter {
+    private func dayHeading(_ date: Date, calendar: Calendar) -> some View {
+        let relative = calendar.isDateInToday(date) ? "今天" : calendar.isDateInYesterday(date) ? "昨天" : nil
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+            if let relative { Text(relative).font(.headline) }
+            Text(date.formatted(date: .abbreviated, time: .omitted))
+                .font(relative == nil ? .headline : .caption)
+                .foregroundStyle(relative == nil ? .primary : .secondary)
+        }
+        .accessibilityAddTraits(.isHeader)
+    }
+
+    @ViewBuilder
+    private var emptyGallery: some View {
+        if model.isLoadingInbox {
+            ProgressView("正在读取图库")
+        } else {
+            VStack(spacing: 9) {
+                Image(systemName: activeSource == .mac ? "viewfinder" : "photo.on.rectangle")
+                    .font(.system(size: 27, weight: .light))
+                    .accessibilityHidden(true)
+                Text(activeSource == .mac ? "还没有本机截图" : activeSource == nil ? "暂无未归类文件" : "还没有收到图片或视频")
+                    .font(.callout)
+                if activeSource == .mac {
+                    Text("点击「开始截图」后拖选区域，按空格可选择窗口。")
+                        .font(.caption)
+                }
+            }
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private func validFilter(devices: [ScreenshotDevice], hasUnknown: Bool) -> GalleryDeviceFilter {
         guard let activeSource, let chosen = filters[activeSource] else { return .all }
         switch chosen {
         case .device(let device): return devices.contains(device) ? chosen : .all
@@ -365,112 +346,46 @@ struct GalleryView: View {
     }
 }
 
-private struct GalleryTab: View {
-    let title: String
-    let selected: Bool
-    let theme: GalleryTheme
-    var compact = false
-    let subtitle: String?
-    let conversation: MacConversationRoom?
-    let action: () -> Void
-
-    @State private var hovering = false
-
-    init(_ title: String, selected: Bool, theme: GalleryTheme, compact: Bool = false,
-         subtitle: String? = nil, conversation: MacConversationRoom? = nil, action: @escaping () -> Void) {
-        self.title = title
-        self.selected = selected
-        self.theme = theme
-        self.compact = compact
-        self.subtitle = subtitle
-        self.conversation = conversation
-        self.action = action
-    }
-
-    var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 5) {
-                    Text(title)
-                        .font(compact ? .callout : .body)
-                        .fontWeight(selected ? .semibold : .regular)
-                        .foregroundStyle(selected ? theme.accent : Color.primary)
-                    if let conversation {
-                        ConversationTabBadge(room: conversation)
-                    }
-                }
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-                .lineLimit(1)
-                .frame(maxWidth: compact ? 180 : nil, alignment: .leading)
-                .padding(.horizontal, compact ? 10 : 14)
-                .frame(minHeight: subtitle == nil ? (compact ? 28 : 35) : 39)
-                .background(selectionColor, in: RoundedRectangle(cornerRadius: 7))
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .accessibilityAddTraits(selected ? [.isSelected] : [])
-    }
-
-    private var selectionColor: Color {
-        if selected { return theme.selection }
-        return hovering ? theme.selection.opacity(0.38) : .clear
-    }
-}
-
 private struct ScreenshotTile: View {
     let image: ReceivedScreenshot
     let deviceLabel: String?
     let source: ScreenshotSource?
     let theme: GalleryTheme
+    let height: CGFloat
     let preview: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: preview) {
-            VStack(alignment: .leading, spacing: 0) {
-                GalleryImageView(url: image.url, date: image.date, maximumDimension: 440)
+            VStack(alignment: .leading, spacing: 6) {
+                GalleryImageView(url: image.url, date: image.date, maximumDimension: 512)
                     .padding(9)
-                    .frame(height: 166)
-                    .background(theme.mat(for: source))
+                    .frame(height: height)
+                    .background(theme.mat(for: source), in: RoundedRectangle(cornerRadius: 12))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12)
+                            .strokeBorder(hovering ? theme.accent : .clear, lineWidth: 1.5)
+                    }
                     .overlay(alignment: .bottomTrailing) {
                         if image.isVideo {
                             Image(systemName: "play.fill")
-                                .font(.caption)
-                                .foregroundStyle(.white)
-                                .padding(7)
-                                .background(.black.opacity(0.65), in: Circle())
-                                .padding(8)
+                                .font(.caption).foregroundStyle(.white)
+                                .padding(6).background(.black.opacity(0.65), in: Circle()).padding(7)
                                 .accessibilityHidden(true)
                         }
                     }
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(image.date.formatted(date: .abbreviated, time: .standard))
+                HStack {
+                    Text(image.date.formatted(date: .omitted, time: .standard))
                         .font(.callout.weight(.semibold).monospacedDigit())
-                        .lineLimit(1)
+                    Spacer(minLength: 4)
                     if let deviceLabel {
-                        Text(deviceLabel)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                        Text(deviceLabel).font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity, minHeight: deviceLabel == nil ? 38 : 49, alignment: .topLeading)
+                .lineLimit(1)
+                .padding(.horizontal, 2)
             }
-            .background(theme.panel)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay {
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(hovering ? theme.accent : theme.border)
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 10))
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
@@ -508,23 +423,24 @@ struct ReceiverStatusLabel: View {
 
 struct GalleryTheme {
     private let dark: Bool
+    static let brand = Color(red: 0.07, green: 0.34, blue: 0.28)
 
     init(_ colorScheme: ColorScheme) { dark = colorScheme == .dark }
 
-    var page: Color { color(0xf7f9fd, 0x131b2a) }
-    var panel: Color { color(0xffffff, 0x1c2637) }
-    var subnavigation: Color { color(0xf2f5fa, 0x192334) }
-    var border: Color { color(0xdbe1ec, 0x303d51) }
-    var selection: Color { color(0xdce8ff, 0x273d67) }
-    var accent: Color { color(0x224faf, 0xb8ceff) }
+    var page: Color { color(0xf8faf6, 0x0e1614) }
+    var panel: Color { color(0xffffff, 0x1d2924) }
+    var subnavigation: Color { color(0xeef3ee, 0x16211d) }
+    var border: Color { color(0xd9e3da, 0x35453b) }
+    var selection: Color { color(0xdeebe2, 0x263d32) }
+    var accent: Color { dark ? Color(red: 0.55, green: 0.86, blue: 0.72) : Self.brand }
 
     func mat(for source: ScreenshotSource?) -> Color {
         switch source {
-        case .iOS: color(0xdde8fc, 0x263b60)
-        case .android: color(0xdceeea, 0x24463f)
-        case .harmony: color(0xece6f6, 0x3a3051)
-        case .mac: color(0xe0e9f2, 0x293b4d)
-        case nil: color(0xe6edf4, 0x29384b)
+        case .iOS: color(0xd6e1d8, 0x304139)
+        case .android: color(0xe4e8d8, 0x3b433b)
+        case .harmony: color(0xe6e2d7, 0x433f34)
+        case .mac: color(0xd9e1dc, 0x303c35)
+        case nil: color(0xe1e4df, 0x373d3b)
         }
     }
 

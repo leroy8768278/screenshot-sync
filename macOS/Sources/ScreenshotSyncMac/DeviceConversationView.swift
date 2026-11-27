@@ -11,7 +11,7 @@ struct ConversationTabBadge: View {
                 .font(.caption2.weight(.semibold).monospacedDigit())
                 .padding(.horizontal, 5)
                 .foregroundStyle(.white)
-                .background(Color.accentColor, in: Capsule())
+                .background(GalleryTheme.brand, in: Capsule())
                 .accessibilityLabel("\(room.unread) 条未读消息")
         }
     }
@@ -24,6 +24,7 @@ struct DeviceConversationView: View {
 
     @Environment(\.controlActiveState) private var windowState
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var clearRequest: ClearRequest?
 
     private struct ClearRequest: Identifiable {
@@ -62,8 +63,8 @@ struct DeviceConversationView: View {
                 .padding(.bottom, 10)
             }
         }
-        .background(theme.panel, in: RoundedRectangle(cornerRadius: 11))
-        .overlay { RoundedRectangle(cornerRadius: 11).strokeBorder(theme.border) }
+        .background(theme.panel, in: RoundedRectangle(cornerRadius: 14))
+        .overlay { RoundedRectangle(cornerRadius: 14).strokeBorder(theme.border) }
         .onAppear { markReadIfVisible() }
         .onChange(of: room.unread) { _ in markReadIfVisible() }
         .onChange(of: room.expanded) { _ in markReadIfVisible() }
@@ -90,17 +91,18 @@ struct DeviceConversationView: View {
             HStack(spacing: 9) {
                 Image(systemName: "bubble.left.and.bubble.right")
                     .foregroundStyle(theme.accent)
-                    .frame(width: 30, height: 30)
-                    .background(theme.selection, in: RoundedRectangle(cornerRadius: 8))
-                Text("与 \(deviceName) 对话")
-                    .font(.body.weight(.semibold))
-                    .lineLimit(1)
-                    .layoutPriority(1)
-                Text(previewLine)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                    .frame(width: 32, height: 32)
+                    .background(theme.selection, in: RoundedRectangle(cornerRadius: 10))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("与 \(deviceName) 对话")
+                        .font(.body.weight(.semibold))
+                        .lineLimit(1)
+                    Text(previewLine)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
                 Spacer(minLength: 6)
                 if room.unread > 0 {
                     Text("\(room.unread) 条未读")
@@ -108,7 +110,7 @@ struct DeviceConversationView: View {
                         .foregroundColor(.white)
                         .padding(.horizontal, 7)
                         .padding(.vertical, 2)
-                        .background(Color.accentColor, in: Capsule())
+                        .background(GalleryTheme.brand, in: Capsule())
                 }
                 Image(systemName: room.expanded ? "chevron.up" : "chevron.down")
                     .font(.caption.weight(.semibold))
@@ -191,6 +193,7 @@ struct DeviceConversationView: View {
                     Label("选文件", systemImage: "paperclip")
                 }
                 .buttonStyle(.borderless)
+                .foregroundStyle(theme.accent)
                 .disabled(room.sending)
                 Spacer()
                 if room.sending {
@@ -198,15 +201,23 @@ struct DeviceConversationView: View {
                 }
                 Button("发送", action: room.send)
                     .buttonStyle(.borderedProminent)
+                    .tint(GalleryTheme.brand)
                     .keyboardShortcut(.return, modifiers: .command)
                     .disabled(!room.canSend)
                     .help("回车发送，Shift + 回车换行")
                     .accessibilityIdentifier("conversation-send")
             }
         }
-        .padding(9)
-        .background(theme.page, in: RoundedRectangle(cornerRadius: 8))
-        .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(theme.border) }
+        .padding(10)
+        .background {
+            let shape = RoundedRectangle(cornerRadius: 12)
+            if #available(macOS 26.0, *), !reduceTransparency {
+                shape.fill(.clear).glassEffect(.regular, in: shape)
+            } else {
+                shape.fill(reduceTransparency ? AnyShapeStyle(theme.page) : AnyShapeStyle(.regularMaterial))
+                    .overlay { shape.strokeBorder(theme.border) }
+            }
+        }
     }
 }
 
@@ -244,7 +255,7 @@ private struct ConversationBubble: View {
                     Text(filename).truncationMode(.middle)
                     Text(ByteCountFormatter.string(fromByteCount: Int64(message.bytes), countStyle: .file))
                         .foregroundStyle(.secondary)
-                    Button(!mine && !room.received.contains(message.id) ? "接收…" : "另存为…") { room.save(message) }
+                    Button(!mine && !room.received.contains(message.id) ? "接收" : "另存为") { room.save(message) }
                     if isTextFile {
                         Button("查看文本") { previewing = true }
                             .popover(isPresented: $previewing) {
